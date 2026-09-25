@@ -39,7 +39,15 @@ def answer_prompts(mock: MockChatModel) -> list[str]:
 def directive_section(prompt: str) -> str:
     """系统提示词中【相处方式】那一段（不含后面其他段）。"""
     after = prompt.split("=== 相处方式", 1)[1]
-    return after.split("=== 近期发生的事", 1)[0]
+    return after.split("=== 发生的事", 1)[0]
+
+
+def last_answer_fulltext(mock: MockChatModel) -> str:
+    """最近一次对话回答调用的完整提示词（系统 + 历史 + 当前提问）。"""
+    for c in reversed(mock.calls):
+        if c["messages"] and "记忆沉淀模块" not in str(c["messages"][0]["content"]):
+            return "\n".join(str(m["content"]) for m in c["messages"])
+    return ""
 
 
 class BehaviorMock(MockChatModel):
@@ -270,3 +278,131 @@ def test_session_history_persists_across_chats(conversation, chat_store, mock_mo
     assert chat_store.count_messages(r1.session_id) == 4
     history = chat_store.history(r1.session_id, order="asc")
     assert [m["role"] for m in history] == ["user", "assistant", "user", "assistant"]
+
+
+# ------------------------------------------------- B 组：利用过去理解现在
+from datetime import datetime, timedelta  # noqa: E402
+
+from memory.event import Event  # noqa: E402
+
+
+def _days_ago_event(description: str, days: int = 3, importance: float = 0.7) -> Event:
+    return Event(
+        created_at=datetime.now().astimezone() - timedelta(days=days),
+        source="chat",
+        description=description,
+        importance=importance,
+    )
+
+
+def test_b1_context_entry_resurfaces_progress_without_keywords(
+    conversation, store, context_store, mock_model
+):
+    """B1：几天前记录的进展与卡点，新提问不含原关键词，仍进提示词 + 带接回指令。"""
+    store.add_event(_days_ago_event(
+        "项目X 的摄像头联调进行到一半，Windows 隐私开关未打开，暂停"
+    ))
+    context_store.add_entry(
+        "dynamic", "正在推进 Personal AI 项目，画面已接入，差系统隐私开关", source="chat"
+    )
+
+    mock_model.text_queue = [
+        "接回上次：你停在系统隐私开关那步，打开它就能继续。",
+        deposit_json(),
+    ]
+    conversation.chat("我们说回那个没做完的东西，你觉得我现在到哪一步了、该从哪继续？")
+
+    prompt = answer_prompts(mock_model)[-1]
+    assert "画面已接入，差系统隐私开关" in prompt      # 上下文条目通道
+    assert "摄像头联调进行到一半" in prompt            # 更早的事件也在（检索级联）
+    assert "主动接回" in prompt and "上次做到哪" in prompt  # 接回指令在
+    # 新提问确实不含存储时的关键词（防止测试自欺）
+    for kw in ("摄像头", "隐私", "联调", "开关"):
+        assert kw not in "我们说回那个没做完的东西，你觉得我现在到哪一步了、该从哪继续？"
+
+
+def test_b1_old_event_pushed_out_of_recent_still_resurfaces_via_context(
+    conversation, store, context_store, mock_model
+):
+    """更强的 B1：旧事件被 12 条新事件挤出"最近 8 条"且关键词全不中——
+    事件通道失效，只剩 Personal Context 通道，AI 仍拿得到卡点。"""
+    now = datetime.now().astimezone()
+    for i in range(12):
+        store.add_event(Event(
+            created_at=now - timedelta(minutes=i),
+            description=f"日常琐事第{i}件",
+            importance=0.2,
+        ))
+    store.add_event(_days_ago_event("项目X 摄像头联调暂停于隐私开关"))
+    context_store.add_entry(
+        "dynamic", "正在推进 Personal AI 项目，差系统隐私开关", source="chat"
+    )
+
+    mock_model.text_queue = ["接回上次：你停在系统隐私开关那步。", deposit_json()]
+    conversation.chat("我们说回那个没做完的东西，到哪一步了？")
+
+    prompt = answer_prompts(mock_model)[-1]
+    assert "差系统隐私开关" in prompt            # Context 条目：不依赖关键词、不依赖近期
+    assert "日常琐事第0件" in prompt             # 近期事件确实占了列表
+    assert "摄像头联调暂停" not in prompt        # 旧事件被挤出了——是 Context 救的场
+
+
+def test_b2_cross_turn_constraint_applies(conversation, mock_model):
+    """B2：三轮之前透露的约束，后续回答自然适用，无需重复交代。"""
+    mock_model.text_queue = [
+        "记住了。",
+        deposit_json(new=[{"kind": "fact", "content": "用户不吃辣"}]),
+    ]
+    conversation.chat("对了，我不吃辣")
+    mock_model.text_queue = ["好啊，说点别的。", deposit_json()]
+    conversation.chat("换个话题")
+    mock_model.text_queue = [
+        "既然你不吃辣，推荐番茄牛腩煲，微甜开胃。",
+        deposit_json(),
+    ]
+    r = conversation.chat("晚上吃啥好？")
+
+    fulltext = last_answer_fulltext(mock_model)
+    assert "用户不吃辣" in fulltext        # 上下文条目通道
+    assert "我不吃辣" in fulltext          # 会话历史通道（两头都在）
+    assert "不吃辣" in r.answer            # 后续回答实际用上了
+
+
+def test_b3_context_assembled_before_first_message(
+    conversation, store, context_store, caplog
+):
+    """B3：交互一开始上下文就已组装完毕，日志可证（近期事件+画像+动态）。"""
+    import logging
+
+    context_store.add_entry("profile", "用户是高二学生")
+    context_store.add_entry("dynamic", "正在准备期中考试")
+    store.add_event(Event(description="昨晚复习到很晚", source="manual"))
+
+    with caplog.at_level(logging.INFO, logger="core.conversation"):
+        conversation.chat("你好")
+
+    record = next(r for r in caplog.records if "上下文组装" in r.getMessage())
+    assert "画像1" in record.getMessage() and "动态1" in record.getMessage()
+    assert "事件 1 条" in record.getMessage()
+
+
+# ------------------------------------------------- C2：后台静默沉淀
+
+def test_c2_deposit_never_reported_in_answer(conversation, mock_model):
+    """C2：沉淀在后台完成——回答原文不含任何'我学到了/已更新档案'式汇报，
+    沉淀结果只出现在独立元数据字段。"""
+    answer_text = "给你一个提示：先试试移项。"
+    mock_model.text_queue = [
+        answer_text,
+        deposit_json(new=[{"kind": "interaction", "content": "先给提示"}]),
+    ]
+    r = conversation.chat("以后先给提示")
+
+    assert r.answer == answer_text                       # 回答原样
+    assert not any(
+        m in r.answer for m in ("我学到了", "新理解", "已更新", "档案", "沉淀")
+    )
+    assert r.deposit and r.deposit["created"]            # 沉淀信息只在元数据里
+    history = conversation.chat_store.history(r.session_id, order="asc")
+    assert history[-1]["role"] == "assistant"
+    assert history[-1]["content"] == answer_text         # 存的历史也是原样

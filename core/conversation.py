@@ -14,7 +14,7 @@ import logging
 import time
 from dataclasses import dataclass
 
-from memory.context_store import ContextEntry, ContextStore
+from memory.context_store import KIND_LABELS, ContextEntry, ContextStore
 from memory.store import MemoryStore
 from models.base import BaseModelAdapter
 
@@ -29,10 +29,12 @@ CHAT_SYSTEM = (
     "1) 使用下方“关于这个人的理解”组织回应，让它感觉到你懂他；\n"
     "2) 遇到与理解冲突的信息，以用户当下所说为准；\n"
     "3) 简洁自然，不要汇报你在做什么、不要解释你检索了什么；\n"
-    "4) 默认克制：只在有帮助时多说，不主动长篇大论。\n"
+    "4) 默认克制：只在有帮助时多说，不主动长篇大论；\n"
+    "5) 若“发生的事”里有与他当前话题相关的旧事（哪怕他换了说法），"
+    "主动接回：上次做到哪、卡在哪、当时为什么停——一句话自然带出，别像汇报。\n"
     "\n=== 关于这个人的理解 ===\n{context_block}"
     "\n\n=== 相处方式（来自他的过往反馈，必须遵守）===\n{directives_block}"
-    "\n\n=== 近期发生的事 ===\n{events_block}"
+    "\n\n=== 发生的事（近期 + 与话题相关的更早记录）===\n{events_block}"
 )
 
 
@@ -90,13 +92,30 @@ class ConversationService:
         self.settings = settings or default_settings
         self.chat_store = chat_store or ChatStore(store.db_path)
         self.depositor = Depositor(context_store, store, model, settings=self.settings)
+        # 话题命中复用回忆的检索级联（D003；模型只是构造需要，不参与检索）
+        from .context import Recaller
+
+        self._recaller = Recaller(store, model, settings=self.settings)
 
     # ---------- 组装 ----------
     def _assemble(
-        self, session_id: str, entries: list[ContextEntry]
+        self, session_id: str, entries: list[ContextEntry], message: str
     ) -> tuple[list[dict], list[str]]:
+        from .context import plan_query
+
         directives = derive_directives(entries)
-        events = self.store.list_events(limit=self.settings.chat_events_max)
+
+        # 近期事件 + 话题命中的更早事件（B1：重提旧事），合并去重
+        matched, _ = self._recaller.retrieve(plan_query(message))
+        recent = self.store.list_events(limit=self.settings.chat_events_max)
+        seen: set[str] = set()
+        events = []
+        for e in [*matched, *recent]:
+            if e.id not in seen:
+                seen.add(e.id)
+                events.append(e)
+        events = events[: self.settings.chat_events_total]
+
         # 取最近 N 条并按时间正序进入提示词（desc 取最近，再翻回正序）
         history = self.chat_store.history(
             session_id, limit=self.settings.chat_history_max, order="desc"
@@ -110,6 +129,20 @@ class ConversationService:
         messages: list[dict] = [{"role": "system", "content": system}]
         messages.extend(
             {"role": m["role"], "content": m["content"]} for m in history
+        )
+
+        # B3 无问先备：组装完成即入日志（可审计）
+        kinds: dict[str, int] = {}
+        for e in entries:
+            label = KIND_LABELS.get(e.kind, e.kind)
+            kinds[label] = kinds.get(label, 0) + 1
+        log.info(
+            "上下文组装：理解 %d 条（%s）· 事件 %d 条（话题命中 %d）· 会话历史 %d 条",
+            len(entries),
+            "、".join(f"{k}{v}" for k, v in kinds.items() if v) or "无",
+            len(events),
+            len(matched),
+            len(history),
         )
         return messages, directives
 
@@ -125,7 +158,7 @@ class ConversationService:
 
         # ---- 读 ----
         entries = self.ctx.list_entries(limit=self.settings.context_max_entries)
-        messages, directives = self._assemble(sid, entries)
+        messages, directives = self._assemble(sid, entries, message)
         messages.append({"role": "user", "content": message})
 
         answer = self.model.chat(

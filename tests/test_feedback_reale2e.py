@@ -78,3 +78,29 @@ def test_real_feedback_loop_changes_behavior(real_conversation):
     assert any(w in r3.answer for w in ("提示", "试试", "自己", "先")), (
         f"第二轮回答不含任何提示性表达：{r3.answer}"
     )
+
+
+def test_real_b1_resurfaces_old_stuck_point(real_conversation):
+    """B1 真模型演示：几天前的进展与卡点，提问换了说法，仍接回旧事。"""
+    from datetime import datetime, timedelta
+
+    from memory.event import Event
+
+    conv, store, ctx = real_conversation
+    store.add_event(Event(
+        created_at=datetime.now().astimezone() - timedelta(days=3),
+        source="chat",
+        description="项目X 的摄像头联调进行到一半，Windows 隐私开关未打开，暂停在这一步",
+        importance=0.7,
+    ))
+    ctx.add_entry(
+        "dynamic", "正在推进 Personal AI 项目，画面已接入，差系统隐私开关", source="chat"
+    )
+
+    question = "我们说回那个没做完的东西，你觉得我现在到哪一步了、该从哪继续？"
+    for kw in ("摄像头", "隐私", "开关", "联调"):
+        assert kw not in question, "演示问题不应含存储时的关键词"
+    r = conv.chat(question)
+    assert any(
+        w in r.answer for w in ("隐私", "开关", "摄像头", "画面")
+    ), f"没有接回旧事：{r.answer}"

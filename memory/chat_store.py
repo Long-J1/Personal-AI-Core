@@ -112,20 +112,21 @@ class ChatStore:
     def history(
         self, conv_id: str, limit: int = 50, order: str = "asc"
     ) -> list[dict]:
-        """返回消息列表；order='asc' 按时间正序，'desc' 倒序（取最近 N 条）。"""
-        sql_order = "DESC" if order == "desc" else "ASC"
+        """返回消息列表；order='asc' 按时间正序，'desc' 取最近 N 条再翻回正序
+        （供提示词使用：最近的、但按时间先后排列）。
+        rowid 作平局裁决——Windows 时钟粒度下同一毫秒插入也必须稳定排序。"""
         with closing(self._connect()) as con:
             if order == "desc":
                 rows = con.execute(
                     "SELECT role, content, iso FROM chat_messages WHERE conv_id=? "
-                    f"ORDER BY epoch {sql_order} LIMIT ?",
+                    "ORDER BY epoch DESC, rowid DESC LIMIT ?",
                     (conv_id, limit),
                 ).fetchall()
                 rows = list(reversed(rows))
             else:
                 rows = con.execute(
                     "SELECT role, content, iso FROM chat_messages WHERE conv_id=? "
-                    f"ORDER BY epoch {sql_order} LIMIT ?",
+                    "ORDER BY epoch ASC, rowid ASC LIMIT ?",
                     (conv_id, limit),
                 ).fetchall()
         return [dict(r) for r in rows]

@@ -41,13 +41,14 @@ class Settings:
     chat_history_max: int = 20            # 进入提示词的对话历史条数
     context_max_entries: int = 40         # 进入提示词的理解条目上限
     chat_events_max: int = 8              # 对话时携带的近期事件条数
+    chat_events_total: int = 14           # 近期 + 话题命中合并后的事件总上限
     deposit_max_new: int = 3              # 单轮最多新增几条理解（防模型刷屏）
     deposit_max_chars: int = 200          # 单条理解内容长度上限
 
     # 日志
     log_level: str = os.environ.get("PAI_LOG_LEVEL", "INFO")
 
-    version: str = "0.1.0"
+    version: str = "0.2.0"
 
 
 settings = Settings()

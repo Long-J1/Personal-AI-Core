@@ -16,6 +16,7 @@ from memory.store import MemoryStore
 from models.base import BaseModelAdapter, ModelError
 
 from .config import THUMB_DIR, Settings, settings as default_settings
+from .audit import audit_silence
 from .intervention import InterventionDecision, InterventionPolicy
 from .policy import MemoryPolicy
 from .understanding import UNDERSTAND_PROMPT, parse_understanding
@@ -140,6 +141,18 @@ class CorePipeline:
 
         # 4) 介入决策（V0.1 永远沉默，仅记录决策结果）
         idec = self.intervention.decide(event)
+        # 5) 沉默记账（开发期审计，只进日志文件，不进记忆库——PLAN C1）
+        audit_silence({
+            "kind": "observation_silence",
+            "epoch": time.time(),
+            "iso": datetime.now().astimezone().isoformat(),
+            "event_id": event.id,
+            "source": event.source,
+            "importance": round(float(event.importance), 3),
+            "stored": stored,
+            "intervene": idec.intervene,
+            "reason": idec.reason,
+        })
         log.info(
             "观察完成 event=%s stored=%s parse_ok=%s 耗时=%.1fs 介入=%s",
             event.id[:8],
