@@ -1,0 +1,9 @@
+# Personal AI Core V0.1 运行依赖（本机已全部安装）
+# 安装命令见 README.md（国内镜像：-i https://mirrors.aliyun.com/pypi/simple/）
+fastapi>=0.110
+uvicorn>=0.29
+pydantic>=2.6
+httpx>=0.27
+Pillow>=10.0
+opencv-python>=4.9     # 仅服务器端摄像头抓帧用，可选
+pytest>=8.0            # 测试

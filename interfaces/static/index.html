@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Personal AI · Core V0.1</title>
+<style>
+  :root {
+    --bg: #f4f5f8; --card: #ffffff; --ink: #1b1f2a; --muted: #6b7280;
+    --accent: #4f46e5; --accent-soft: #eef2ff; --ok: #059669; --bad: #dc2626;
+    --warn: #d97706; --line: #e5e7eb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    line-height: 1.55;
+  }
+  header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 22px; background: var(--card); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .brand { font-size: 18px; font-weight: 700; }
+  .brand .ver { font-size: 12px; font-weight: 500; color: var(--muted); margin-left: 6px; }
+  .badges { display: flex; gap: 8px; flex-wrap: wrap; }
+  .badge {
+    font-size: 12px; padding: 3px 10px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent); font-weight: 600;
+  }
+  .badge.off { background: #fee2e2; color: var(--bad); }
+  .badge.muted { background: #f3f4f6; color: var(--muted); }
+  main { max-width: 880px; margin: 20px auto; padding: 0 16px; display: grid; gap: 16px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 18px 20px; box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+  h2 small { font-weight: 400; color: var(--muted); font-size: 12px; margin-left: 8px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  button, .filebtn {
+    border: 1px solid var(--line); background: #fff; color: var(--ink);
+    border-radius: 9px; padding: 8px 14px; font-size: 14px; cursor: pointer;
+    transition: .15s; font-family: inherit;
+  }
+  button:hover:not(:disabled), .filebtn:hover { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { filter: brightness(1.1); color: #fff; }
+  button.danger { color: var(--bad); }
+  button.danger:hover { border-color: var(--bad); background: #fef2f2; }
+  input[type=text], input:not([type]) {
+    flex: 1; min-width: 220px; border: 1px solid var(--line); border-radius: 9px;
+    padding: 9px 12px; font-size: 14px; font-family: inherit; outline: none;
+  }
+  input:focus { border-color: var(--accent); }
+  video { width: 100%; max-height: 320px; border-radius: 10px; background: #000; margin-top: 10px; }
+  .hint { font-size: 13px; color: var(--muted); margin-top: 10px; }
+  .hint.warn { color: var(--warn); }
+  .chips { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip {
+    font-size: 12px; padding: 4px 10px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent); border: none;
+  }
+  .chip:hover { filter: brightness(.96); }
+  .result { display: flex; gap: 14px; margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 14px; }
+  .result img { width: 132px; height: 96px; object-fit: cover; border-radius: 8px; background: #eee; }
+  .eventbody { flex: 1; min-width: 0; }
+  .eventbody b { font-size: 15px; }
+  .meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+  .tag {
+    font-size: 12px; background: #f3f4f6; border-radius: 6px; padding: 2px 8px; color: var(--muted);
+  }
+  .verdict { margin-top: 8px; font-size: 13px; font-weight: 600; }
+  .verdict.ok { color: var(--ok); }
+  .verdict.no { color: var(--bad); }
+  .answer {
+    margin-top: 12px; background: var(--accent-soft); border-radius: 10px;
+    padding: 12px 14px; font-size: 14px; white-space: pre-wrap; word-break: break-word;
+  }
+  .sources { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .source {
+    font-size: 12px; background: #fff; border: 1px solid var(--line);
+    border-radius: 7px; padding: 3px 8px; color: var(--muted);
+  }
+  .source b { color: var(--ink); font-weight: 600; }
+  .tools button { font-size: 13px; padding: 6px 12px; }
+  .memlist { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 8px; }
+  .mem {
+    display: flex; gap: 12px; align-items: flex-start; border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 12px;
+  }
+  .mem .when { font-size: 12px; color: var(--muted); white-space: nowrap; min-width: 86px; }
+  .mem .desc { flex: 1; font-size: 14px; min-width: 0; word-break: break-word; }
+  .mem .desc small { color: var(--muted); display: block; }
+  .mem .imp { font-size: 11px; color: var(--warn); }
+  .mem button { padding: 4px 10px; font-size: 12px; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; padding: 18px 0 26px; }
+  .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid #cbd5e1;
+    border-top-color: var(--accent); border-radius: 50%; animation: sp 1s linear infinite;
+    vertical-align: -2px; margin-right: 6px; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">🧠 Personal AI <span class="ver">Core V0.1</span></div>
+  <div class="badges">
+    <span id="recBadge" class="badge">记录中</span>
+    <span id="evtBadge" class="badge muted">0 条记忆</span>
+    <span id="modelBadge" class="badge muted">模型检查中…</span>
+  </div>
+</header>
+
+<main>
+  <!-- ① 观察 -->
+  <section class="card">
+    <h2>① 观察 <small>感知 → 理解 → 事件 → 记忆</small></h2>
+    <div class="row">
+      <button id="btnCamera">📷 打开摄像头</button>
+      <button id="btnShot" class="primary" disabled>拍照并观察</button>
+      <label class="filebtn">🖼️ 上传图片
+        <input type="file" id="fileInput" accept="image/*" hidden>
+      </label>
+      <button id="btnStopCam" hidden>关闭摄像头</button>
+    </div>
+    <video id="video" playsinline hidden></video>
+    <div id="camHint" class="hint warn" hidden></div>
+    <div id="observeHint" class="hint" hidden></div>
+    <div id="observeResult" class="result" hidden>
+      <img id="resultThumb" alt="场景缩略图">
+      <div class="eventbody">
+        <b id="evDesc"></b>
+        <div class="meta">
+          <span class="tag" id="evTime"></span>
+          <span class="tag" id="evScene"></span>
+          <span class="tag" id="evAct"></span>
+          <span class="tag" id="evImp"></span>
+        </div>
+        <div class="meta" id="evObjects"></div>
+        <div class="verdict" id="evVerdict"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ② 回忆 -->
+  <section class="card">
+    <h2>② 回忆 <small>从记忆库里检索并回答，附带依据</small></h2>
+    <div class="row">
+      <input id="qInput" type="text" placeholder="例如：刚才我在干什么？">
+      <button id="btnAsk" class="primary">提问</button>
+    </div>
+    <div class="chips">
+      <button class="chip" data-q="刚才我在干什么">刚才我在干什么</button>
+      <button class="chip" data-q="今天我都做了什么">今天我都做了什么</button>
+      <button class="chip" data-q="昨天发生了什么">昨天发生了什么</button>
+      <button class="chip" data-q="最近有什么重要的事">最近有什么重要的事</button>
+    </div>
+    <div id="answerBox" class="answer" hidden>
+      <div id="ansText"></div>
+      <div class="sources" id="ansSources"></div>
+      <div class="hint" id="ansMeta"></div>
+    </div>
+  </section>
+
+  <!-- ③ 记忆库 -->
+  <section class="card">
+    <h2>③ 记忆库 <small>你拥有它：可查看 · 删除 · 导出 · 暂停</small></h2>
+    <div class="row tools">
+      <button id="btnPause">⏸ 暂停记录</button>
+      <button id="btnExport">⬇ 导出 JSON</button>
+      <button id="btnClear" class="danger">🗑 清空全部</button>
+      <button id="btnRefresh">↻ 刷新</button>
+    </div>
+    <ul id="memList" class="memlist"></ul>
+    <div id="memEmpty" class="hint" hidden>还没有记忆。去 ① 里拍一张或传一张图试试。</div>
+  </section>
+</main>
+
+<footer>本地运行 · 所有记忆只保存在这台电脑的 data/personal_ai.db · 模型服务：<span id="footModel">-</span></footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let camStream = null;
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts,
+  });
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* 非 JSON */ }
+  if (!res.ok && data && data.error) throw new Error(data.error);
+  return data;
+}
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function show(el, text) { el.hidden = false; if (text !== undefined) el.textContent = text; }
+function busy(btn, on, text) {
+  if (on) { btn.dataset.old = btn.textContent; btn.disabled = true; btn.textContent = text; }
+  else { btn.disabled = false; btn.textContent = btn.dataset.old || btn.textContent; }
+}
+
+/* ---------- 状态 ---------- */
+async function loadStatus() {
+  try {
+    const s = await api('/api/status');
+    $('recBadge').textContent = s.paused ? '⏸ 已暂停记录' : '● 记录中';
+    $('recBadge').className = 'badge' + (s.paused ? ' off' : '');
+    $('evtBadge').textContent = s.events + ' 条记忆';
+    const ok = s.model_service_ok;
+    $('modelBadge').textContent = ok ? '模型在线' : '模型离线';
+    $('modelBadge').className = 'badge' + (ok ? '' : ' off');
+    $('footModel').textContent = s.model;
+    $('btnPause').textContent = s.paused ? '▶ 恢复记录' : '⏸ 暂停记录';
+  } catch (e) {
+    $('modelBadge').textContent = '服务异常';
+    $('modelBadge').className = 'badge off';
+  }
+}
+
+/* ---------- 观察 ---------- */
+function fileToB64(file, maxSide = 1280) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const s = Math.min(1, maxSide / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * s);
+      c.height = Math.round(img.height * s);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      resolve(c.toDataURL('image/jpeg', 0.85).split(',')[1]);
+      URL.revokeObjectURL(img.src);
+    };
+    img.onerror = reject;
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+async function observeB64(b64, source) {
+  const hint = $('observeHint');
+  show(hint);
+  hint.innerHTML = '<span class="spin"></span>模型观察中…（首次调用需加载模型，约 20-60 秒）';
+  $('observeResult').hidden = true;
+  try {
+    const r = await api('/api/observe', {
+      method: 'POST',
+      body: JSON.stringify({ image_b64: b64, source }),
+    });
+    if (!r.ok || !r.event) {
+      hint.textContent = '❌ 观察失败：' + (r.skip_reason || r.error || '未知原因');
+      hint.className = 'hint warn';
+      loadStatus(); loadMemories();
+      return;
+    }
+    const e = r.event;
+    hint.textContent = `✅ 理解耗时 ${r.duration_s}s` + (r.parse_ok ? '' : '（输出未结构化，已按原文记忆）');
+    hint.className = 'hint';
+    $('evDesc').textContent = e.description;
+    $('evTime').textContent = `🕐 ${e.date_label || (e.created_at || '').slice(0, 16).replace('T', ' ')} ${e.time_label || ''}`.trim();
+    $('evScene').textContent = '📍 ' + (e.scene || '未知场景');
+    $('evAct').textContent = '🎬 ' + (e.activity || '未知活动');
+    $('evImp').textContent = '⭐ 重要度 ' + Number(e.importance).toFixed(1);
+    $('evObjects').innerHTML = (e.objects || []).map(o => `<span class="tag">${esc(o)}</span>`).join('');
+    const v = $('evVerdict');
+    if (r.stored) {
+      v.textContent = '✓ 已存入记忆 · ' + (r.policy_reason || '');
+      v.className = 'verdict ok';
+    } else {
+      v.textContent = '✕ 未记录 · ' + (r.skip_reason || '');
+      v.className = 'verdict no';
+    }
+    const img = $('resultThumb');
+    if (e.image_ref && e.id) { img.src = '/api/thumbs/' + e.id; img.hidden = false; }
+    else { img.hidden = true; }
+    $('observeResult').hidden = false;
+    loadStatus(); loadMemories();
+  } catch (err) {
+    hint.textContent = '❌ ' + err.message;
+    hint.className = 'hint warn';
+  }
+}
+
+$('fileInput').addEventListener('change', async (ev) => {
+  const f = ev.target.files[0];
+  if (!f) return;
+  try { await observeB64(await fileToB64(f), 'upload'); }
+  catch (e) { show($('observeHint'), '❌ 图片读取失败：' + e.message); }
+  ev.target.value = '';
+});
+
+/* 摄像头（浏览器 getUserMedia；失败给出可操作提示） */
+$('btnCamera').addEventListener('click', async () => {
+  $('camHint').hidden = true;
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280 }, audio: false });
+    const v = $('video');
+    v.srcObject = camStream; v.hidden = false;
+    $('btnShot').disabled = false;
+    $('btnStopCam').hidden = false;
+    $('btnCamera').disabled = true;
+  } catch (e) {
+    show($('camHint'),
+      '⚠️ 浏览器无法访问摄像头：' + e.message +
+      '。可到 系统设置 → 隐私和安全性 → 相机 打开“允许桌面应用访问相机”，或直接用图片上传。');
+  }
+});
+$('btnStopCam').addEventListener('click', stopCam);
+function stopCam() {
+  if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+  $('video').hidden = true; $('btnShot').disabled = true;
+  $('btnStopCam').hidden = true; $('btnCamera').disabled = false;
+}
+$('btnShot').addEventListener('click', () => {
+  const v = $('video');
+  const c = document.createElement('canvas');
+  const s = Math.min(1, 1280 / Math.max(v.videoWidth, v.videoHeight));
+  c.width = Math.round(v.videoWidth * s); c.height = Math.round(v.videoHeight * s);
+  c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+  observeB64(c.toDataURL('image/jpeg', 0.85).split(',')[1], 'camera');
+});
+
+/* ---------- 回忆 ---------- */
+async function ask(question) {
+  if (!question.trim()) return;
+  const btn = $('btnAsk');
+  busy(btn, true, '思考中…');
+  $('answerBox').hidden = false;
+  $('ansText').innerHTML = '<span class="spin"></span>正在检索记忆并组织回答…（约 5-30 秒）';
+  $('ansSources').innerHTML = ''; $('ansMeta').textContent = '';
+  try {
+    const r = await api('/api/chat', { method: 'POST', body: JSON.stringify({ question }) });
+    $('ansText').textContent = r.answer;
+    $('ansSources').innerHTML = (r.sources || []).map(s =>
+      `<span class="source"><b>${esc(s.time)}</b> ${esc((s.description || '').slice(0, 30))}</span>`
+    ).join('');
+    let meta = `检索范围：${r.window_label} · 命中 ${r.retrieved_count} 条`;
+    if (r.keywords && r.keywords.length) meta += ` · 关键词：${r.keywords.join('、')}`;
+    if (r.fallback_used) meta += ` · ${r.fallback_used}`;
+    $('ansMeta').textContent = meta;
+  } catch (e) {
+    $('ansText').textContent = '❌ ' + e.message;
+  } finally { busy(btn, false); }
+}
+$('btnAsk').addEventListener('click', () => ask($('qInput').value));
+$('qInput').addEventListener('keydown', e => { if (e.key === 'Enter') ask($('qInput').value); });
+document.querySelectorAll('.chip').forEach(c =>
+  c.addEventListener('click', () => { $('qInput').value = c.dataset.q; ask(c.dataset.q); }));
+
+/* ---------- 记忆库 ---------- */
+async function loadMemories() {
+  try {
+    const r = await api('/api/memories?limit=100');
+    const list = $('memList');
+    $('memEmpty').hidden = r.items.length > 0;
+    list.innerHTML = r.items.map(e => {
+      const when = (e.date_label || (e.created_at || '').slice(0, 10)) + ' ' + (e.time_label || '');
+      const objs = (e.objects || []).slice(0, 6).join('、');
+      return `<li class="mem">
+        <span class="when">${esc(when)}</span>
+        <span class="desc">${esc(e.description)}
+          <small>${esc(e.scene || '')} · ${esc(e.activity || '')}${objs ? ' · ' + esc(objs) : ''}
+          <span class="imp">⭐${Number(e.importance).toFixed(1)}</span></small>
+        </span>
+        <button data-del="${e.id}">删除</button>
+      </li>`;
+    }).join('');
+    list.querySelectorAll('[data-del]').forEach(b =>
+      b.addEventListener('click', async () => {
+        if (!confirm('删除这条记忆？不可恢复。')) return;
+        await api('/api/memories/' + b.dataset.del, { method: 'DELETE' });
+        loadMemories(); loadStatus();
+      }));
+  } catch (e) { /* 静默：顶部状态已提示 */ }
+}
+$('btnRefresh').addEventListener('click', () => { loadMemories(); loadStatus(); });
+$('btnExport').addEventListener('click', () => window.open('/api/memories/export', '_blank'));
+$('btnClear').addEventListener('click', async () => {
+  if (!confirm('⚠️ 将删除全部记忆（事件 + 事实），不可恢复。确定？')) return;
+  if (!confirm('再确认一次：真的要清空你的全部记忆吗？')) return;
+  const r = await api('/api/memories', { method: 'DELETE' });
+  alert('已删除 ' + r.deleted + ' 条记忆');
+  loadMemories(); loadStatus();
+});
+$('btnPause').addEventListener('click', async () => {
+  const s = await api('/api/status');
+  const r = await api('/api/privacy', { method: 'POST', body: JSON.stringify({ paused: !s.paused }) });
+  alert(r.paused ? '已暂停记录：不再调用模型、不再保存新记忆（已存记忆保留）。'
+                 : '已恢复记录。');
+  loadStatus();
+});
+
+/* ---------- 初始化 ---------- */
+loadStatus(); loadMemories();
+setInterval(loadStatus, 15000);
+</script>
+</body>
+</html>
