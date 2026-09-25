@@ -80,3 +80,52 @@ def test_alias_fields():
     assert r.event.scene == "教室" and r.event.activity == "上课"
     assert r.event.description == "正在上课"
     assert r.event.importance == pytest.approx(0.7)
+
+
+# ---------- 截断修复（D008 补记：num_predict 撞上限时的兜底） ----------
+
+from core.understanding import repair_truncated_json  # noqa: E402
+
+
+def test_repair_truncated_in_array():
+    """输出在 corrections 数组中间被硬截断 → 补括号救回 new。"""
+    raw = ('{"new": [{"kind": "profile", "content": "用户是高一学生"}], '
+           '"corrections": [{"ref"')
+    data = repair_truncated_json(raw)
+    assert data is not None
+    assert data["new"][0]["content"] == "用户是高一学生"
+    assert isinstance(data["corrections"], list)
+
+
+def test_repair_truncated_mid_string():
+    """截断点落在字符串值中间 → 裁掉悬空字符串与无值的键。"""
+    raw = '{"new": [{"kind": "fact", "content": "用户不吃香'
+    data = repair_truncated_json(raw)
+    assert data is not None
+    assert data["new"][0]["kind"] == "fact"     # 完整的字段保留
+
+
+def test_repair_truncated_dangling_key_no_value():
+    """结尾是 "event": 没来得及给值 → 去掉悬挂键后补齐。"""
+    raw = '{"new": [], "corrections": [], "event"'
+    data = repair_truncated_json(raw)
+    assert data is not None
+    assert data["new"] == [] and data["corrections"] == []
+
+
+def test_repair_cuts_back_to_last_complete_structure():
+    """补括号也救不活时，砍到最后一个完整闭合的结构再补。"""
+    raw = '{"new": [{"kind": "fact", "content": "不吃香菜"}], "corrections": [{"ref": "#1", "content"'
+    data = repair_truncated_json(raw)
+    assert data is not None
+    assert data["new"][0]["content"] == "不吃香菜"
+
+
+def test_repair_garbage_returns_none():
+    assert repair_truncated_json("这不是JSON") is None
+    assert repair_truncated_json("") is None
+    assert repair_truncated_json("[] 不是对象") is None
+
+
+def test_repair_complete_json_returns_it():
+    assert repair_truncated_json('{"a": 1, "b": [2]}') == {"a": 1, "b": [2]}

@@ -42,3 +42,24 @@
 
 - 测试：`tests/test_conversation.py`（B1/B2/B3/C2）、`tests/test_audit.py`（C1）、
   `tests/test_feedback_reale2e.py::test_real_b1_resurfaces_old_stuck_point`。
+
+## 补记（2026-09-26，验收后发现并修复）
+
+### 6. 空回答与 JSON 截断的同一根病：thinking 吃光预算 → 两层修复
+- **现象**（V0.2 验收与 reale2e 实测）：
+  ① 对话纠正没落地，服务日志显示沉淀输出在 `{"corrections": [{"ref"` 处被切断；
+  ② 偶发**回答为空字符串**，抓原始响应发现 `done=length eval=512 content=''`，
+  512 token 全被 `thinking` 字段（`Here's a thinking process…`）吃掉，正文一个字没出。
+- **根因**：本机模型是带思考阶段的，`eval_count` 计的是思考+正文总和；
+  思考挤占预算 → 预算小则正文（JSON/回答）被截断，预算大则思考正常时没事、
+  但思考长时正文归零。**只调 `num_predict` 治标不治本。**
+- **治本**：`models/ollama_adapter.py` 请求加 `"think": false`——
+  结构化提取、回忆、日常对话都不需要长思考，直接出答案更快（实测 512 token 思考 →
+  ~60 token 正文）且消除整类问题；同时保留 `num_predict: 512` 作为正文预算。
+- **兜底**：`core/understanding.py` 新增 `repair_truncated_json()`——保守修复
+  （裁掉悬空字符串/无值键 → 按括号栈补 `]}` → 仍不行砍到最后一个完整结构再补），
+  **修不好照样返回 None 走"本轮跳过"**，绝不放宽成语义近似的解析。
+  `core/deposit.py` 在 `extract_json` 失败后调用它，成功则记 info 日志。
+- 测试：`tests/test_understanding.py`（修复 5 例 + 垃圾不误收），
+  `tests/test_conversation.py::test_deposit_truncated_json_recovered`（端到端救回）；
+  真模型 reale2e 三连跑验证回答非空。

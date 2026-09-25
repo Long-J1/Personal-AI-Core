@@ -43,7 +43,13 @@ class OllamaAdapter(BaseModelAdapter):
                     "model": self.model,
                     "messages": payload_messages,
                     "stream": False,
-                    "options": {"temperature": 0.3},
+                    # 1) 关思考：本机模型的 thinking 阶段会吃光 token 预算，
+                    #    造成"回答为空"和"沉淀 JSON 被截断"两种病（V0.2 验收实测，D008 补记）；
+                    #    结构化提取/回忆/日常对话都不需要长思考，直接出答案更快更稳。
+                    # 2) num_predict 显式给足 512：关掉思考后全是正文预算，
+                    #    回答和沉淀 JSON 都够用。
+                    "think": False,
+                    "options": {"temperature": 0.3, "num_predict": 512},
                 },
                 timeout=timeout or self.default_timeout,
                 trust_env=False,

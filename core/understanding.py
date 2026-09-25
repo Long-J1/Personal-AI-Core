@@ -83,6 +83,77 @@ def extract_json(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _scan_balance(text: str) -> tuple[bool, int, str]:
+    """扫描括号平衡：返回 (是否悬着未闭合字符串, 该字符串起点, 待补的闭合括号)。"""
+    stack: list[str] = []
+    in_str = esc = False
+    str_start = -1
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str, str_start = True, i
+        elif ch == "{":
+            stack.append("}")
+        elif ch == "[":
+            stack.append("]")
+        elif ch in "}]":
+            if stack and stack[-1] == ch:
+                stack.pop()
+    return in_str, str_start, "".join(reversed(stack))
+
+
+def repair_truncated_json(raw: str) -> dict[str, Any] | None:
+    """尽力修复被硬截断的 JSON（如撞上 num_predict 上限）。
+
+    保守策略（V0.2 验收实测到截断丢失整轮沉淀后加的兜底，D008 补记）：
+      1) 结尾悬着未闭合字符串 → 裁到该字符串开始前；
+      2) 裁掉尾部悬挂的逗号/冒号与无值的键；
+      3) 按未闭合括号栈补齐 ] }；
+      4) 仍解析失败 → 砍到最后一个完整闭合的结构再试；
+      5) 都失败返回 None（绝不放宽成"差不多就收"的解析）。
+    """
+    s = (raw or "").strip()
+    start = s.find("{")
+    if start < 0:
+        return None
+    s = s[start:]
+
+    def try_parse(text: str) -> dict[str, Any] | None:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    for _ in range(8):
+        in_str, str_start, closers = _scan_balance(s)
+        if in_str:
+            s = s[:str_start].rstrip().rstrip(",:")
+            continue
+        t = s.rstrip()
+        if t.endswith((",", ":")):
+            s = t[:-1]
+            continue
+        if re.search(r'[,{]\s*"[^"]*"\s*$', t):     # 悬挂的 "键"（值没来得及给）
+            s = re.sub(r',?\s*"[^"]*"\s*$', "", t).rstrip()
+            continue
+        data = try_parse(t + closers)
+        if data is not None:
+            return data
+        cut = max(t.rfind("}"), t.rfind("]"))
+        if cut <= 0:
+            return None
+        s = t[: cut + 1]
+    return None
+
+
 def _pick(data: dict, key: str) -> Any:
     for alias in _ALIASES.get(key, (key,)):
         if alias in data and data[alias] is not None:

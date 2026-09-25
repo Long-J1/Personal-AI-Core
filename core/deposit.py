@@ -18,7 +18,7 @@ from memory.store import MemoryStore
 from models.base import BaseModelAdapter, ModelError
 
 from .config import Settings, settings as default_settings
-from .understanding import extract_json
+from .understanding import extract_json, repair_truncated_json
 
 log = logging.getLogger("core.deposit")
 
@@ -119,6 +119,11 @@ class Depositor:
             return result
 
         data = extract_json(raw or "")
+        if data is None:
+            # 兜底：输出被硬截断（num_predict 上限）时保守修复，救回整轮沉淀
+            data = repair_truncated_json(raw or "")
+            if data is not None:
+                log.info("沉淀 JSON 被截断，已修复后应用：%s", list(data.keys()))
         if data is None:
             result.error = "沉淀输出不是有效 JSON（本轮跳过）"
             log.warning("%s：%s", result.error, (raw or "")[:80])

@@ -136,6 +136,18 @@ def test_deposit_garbage_skipped_gracefully(
     assert context_store.count_active() == 0
 
 
+def test_deposit_truncated_json_recovered(conversation, context_store, mock_model):
+    """输出被硬截断（num_predict 上限）时，修复兜底救回整轮沉淀（D008 补记）。"""
+    truncated = (
+        '{"new": [{"kind": "profile", "content": "用户是高一学生"}], '
+        '"corrections": [{"ref"'
+    )
+    mock_model.text_queue = ["收到。", truncated]
+    r = conversation.chat("我是高一的")
+    assert r.deposit and r.deposit["error"] is None
+    assert [e.content for e in context_store.list_entries()] == ["用户是高一学生"]
+
+
 def test_model_error_propagates(conversation, mock_model):
     mock_model.fail_with = ModelUnavailableError("连接失败")
     with pytest.raises(ModelUnavailableError):
