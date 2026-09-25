@@ -17,9 +17,12 @@ from pydantic import BaseModel, Field
 
 from core.config import DB_PATH, ensure_dirs, settings
 from core.context import Recaller
+from core.conversation import ConversationService
 from core.pipeline import CorePipeline
+from memory.chat_store import ChatStore
+from memory.context_store import ContextStore
 from memory.store import MemoryStore
-from models.base import BaseModelAdapter
+from models.base import BaseModelAdapter, ModelError
 from models.ollama_adapter import OllamaAdapter
 from perception.base import PerceptionError
 from perception.image_file import normalize_image
@@ -42,6 +45,15 @@ class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=500)
 
 
+class ConversationRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    session_id: str | None = None
+
+
+class ContextUpdateRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=500)
+
+
 class PrivacyRequest(BaseModel):
     paused: bool
 
@@ -53,12 +65,19 @@ def default_model() -> OllamaAdapter:
 def create_app(
     store: MemoryStore | None = None,
     model: BaseModelAdapter | None = None,
+    context_store: ContextStore | None = None,
+    chat_store: ChatStore | None = None,
 ) -> FastAPI:
     ensure_dirs()
     store = store or MemoryStore(DB_PATH)
     model = model or default_model()
+    context_store = context_store or ContextStore(store.db_path)
+    chat_store = chat_store or ChatStore(store.db_path)
     pipeline = CorePipeline(store, model)
     recaller = Recaller(store, model)
+    conversation = ConversationService(
+        store, context_store, model, chat_store=chat_store
+    )
 
     app = FastAPI(title="Personal AI Core", version=settings.version)
 
@@ -90,6 +109,8 @@ def create_app(
             "version": settings.version,
             "model": getattr(model, "model", getattr(model, "name", "unknown")),
             "events": store.count_events(),
+            "context_entries": context_store.count_active(),
+            "sessions": chat_store.count_sessions(),
             "paused": store.paused,
             "model_service_ok": service_ok,
         }
@@ -147,6 +168,80 @@ def create_app(
             "keywords": answer.keywords,
             "fallback_used": answer.fallback_used,
         }
+
+    # ---------- 对话（V0.2：读 Context → 回答 → 沉淀写回）----------
+    @app.post("/api/conversation")
+    def post_conversation(req: ConversationRequest) -> dict:
+        try:
+            reply = conversation.chat(req.message, req.session_id)
+        except ModelError as exc:
+            log.error("对话的模型调用失败：%s", exc)
+            return JSONResponse(
+                {"ok": False, "error": f"模型暂不可用：{exc}"}, status_code=503
+            )
+        return {"ok": True, **reply.to_dict()}
+
+    @app.get("/api/conversation/history")
+    def conversation_history(
+        session_id: str | None = Query(None), limit: int = Query(200, ge=1, le=500)
+    ) -> dict:
+        sid = chat_store.get_or_create_session(session_id)
+        return {
+            "session_id": sid,
+            "messages": chat_store.history(sid, limit=limit, order="asc"),
+        }
+
+    # ---------- Personal Context（"它对你的理解"，信任界面）----------
+    @app.get("/api/context")
+    def list_context() -> dict:
+        items = context_store.list_entries()
+        counts: dict[str, int] = {}
+        for e in items:
+            counts[e.kind] = counts.get(e.kind, 0) + 1
+        return {
+            "total": len(items),
+            "paused": store.paused,
+            "counts": counts,
+            "items": [e.to_public_dict() for e in items],
+        }
+
+    @app.put("/api/context/{entry_id}")
+    def edit_context(entry_id: str, req: ContextUpdateRequest) -> dict:
+        """手动纠正（信任界面：你随时可以改它对你的理解）。"""
+        ok = context_store.correct_entry(
+            entry_id, req.content, source="manual", reason="用户手动编辑"
+        )
+        entry = context_store.get_entry(entry_id)
+        return {
+            "ok": ok,
+            "entry": entry.to_public_dict() if (ok and entry) else None,
+        }
+
+    @app.delete("/api/context/{entry_id}")
+    def delete_context(entry_id: str) -> dict:
+        """删除即失效：后续对话不再使用这条理解。"""
+        found = context_store.delete_entry(entry_id)
+        return {"ok": found, "found": found}
+
+    @app.post("/api/context/{entry_id}/restore")
+    def restore_context(entry_id: str) -> dict:
+        found = context_store.restore_entry(entry_id)
+        return {"ok": found, "found": found}
+
+    @app.get("/api/context/history")
+    def context_history(limit: int = Query(100, ge=1, le=500)) -> dict:
+        """变更历史：它什么时候学到了/被纠正了什么。"""
+        return {"items": context_store.history(limit)}
+
+    @app.get("/api/context/export")
+    def export_context() -> JSONResponse:
+        data = context_store.export_all()
+        return JSONResponse(
+            content=data,
+            headers={
+                "Content-Disposition": "attachment; filename=personal_ai_context.json"
+            },
+        )
 
     # ---------- 记忆管理（查看/删除/导出/暂停）----------
     @app.get("/api/memories")

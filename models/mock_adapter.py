@@ -31,11 +31,14 @@ class MockChatModel(BaseModelAdapter):
         understanding_queue: list[str] | None = None,
         default_understanding: dict[str, Any] | None = None,
         fail_with: Exception | None = None,
+        text_queue: list[str] | None = None,
     ):
         self.queue: list[str] = list(understanding_queue or [])
         self.default_understanding = default_understanding or _DEFAULT_UNDERSTANDING
         self.fail_with = fail_with
         self.calls: list[dict] = []
+        # 纯文本调用的预置回答（对话/沉淀按调用顺序消费；空则走回忆模板）
+        self.text_queue: list[str] = list(text_queue or [])
 
     def chat(
         self,
@@ -52,6 +55,10 @@ class MockChatModel(BaseModelAdapter):
             if self.queue:
                 return self.queue.pop(0)
             return json.dumps(self.default_understanding, ensure_ascii=False)
+
+        # 对话/沉淀等预置文本回答：按调用顺序出队
+        if self.text_queue:
+            return self.text_queue.pop(0)
 
         # 回忆：从提示词中提取记忆行 "- [日期 时间] ..."
         user_text = "\n".join(

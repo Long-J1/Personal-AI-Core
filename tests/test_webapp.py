@@ -117,5 +117,119 @@ def test_export_endpoint(client):
 def test_status_shape(client):
     c, _, _ = client
     s = c.get("/api/status").json()
-    assert set(s) >= {"version", "model", "events", "paused", "model_service_ok"}
+    assert set(s) >= {
+        "version", "model", "events", "paused", "model_service_ok",
+        "context_entries", "sessions",
+    }
     assert s["events"] == 0
+    assert s["context_entries"] == 0
+
+
+# ---------- V0.2：对话 + Personal Context ----------
+
+def _deposit(new=(), corrections=(), event=None) -> str:
+    return json.dumps(
+        {"new": list(new), "corrections": list(corrections), "event": event},
+        ensure_ascii=False,
+    )
+
+
+def test_conversation_endpoint_read_write_and_history(client):
+    c, store, model = client
+
+    model.text_queue = [
+        "收到，我记下了。",
+        _deposit(new=[{"kind": "profile", "content": "用户是高二学生"}]),
+        "那最近忙吗？",
+        _deposit(),
+    ]
+    r = c.post("/api/conversation", json={"message": "我是高二学生"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] and data["answer"] == "收到，我记下了。"
+    assert data["approach"] == ["default"]
+    assert data["deposit"]["created"]
+
+    # 同一会话第二轮：读侧生效（上一轮的理解进了提示词）
+    sid = data["session_id"]
+    r2 = c.post("/api/conversation", json={"message": "最近有点累", "session_id": sid})
+    assert r2.json()["session_id"] == sid
+    answer_calls = [
+        cl for cl in model.calls
+        if "记忆沉淀模块" not in cl["messages"][0]["content"]
+    ]
+    assert "用户是高二学生" in answer_calls[1]["messages"][0]["content"]
+
+    # 会话历史持久化（A3 的"同一会话"）
+    h = c.get("/api/conversation/history").json()
+    assert h["session_id"] == sid
+    assert len(h["messages"]) == 4
+    assert [m["role"] for m in h["messages"]] == ["user", "assistant", "user", "assistant"]
+
+    # Context 可查（A1）
+    ctx = c.get("/api/context").json()
+    assert ctx["total"] == 1
+    assert ctx["items"][0]["source"] == "chat"
+    assert ctx["counts"] == {"profile": 1}
+
+
+def test_context_edit_delete_restore_export(client):
+    c, store, model = client
+    from memory.context_store import ContextStore
+
+    # 种子：与 webapp 内部同一个库文件
+    ctx_store = ContextStore(store.db_path)
+    entry, _ = ctx_store.add_entry("interaction", "回答要简短", source="chat")
+
+    # 手动纠正（信任界面：你随时可以改它对你的理解）
+    r = c.put(f"/api/context/{entry.id}", json={"content": "回答要简短但带点幽默"})
+    assert r.json()["ok"] and r.json()["entry"]["content"] == "回答要简短但带点幽默"
+
+    # 变更历史可查
+    hist = c.get("/api/context/history").json()["items"]
+    assert any(h["action"] == "manual_edit" and h["content_before"] == "回答要简短"
+               for h in hist)
+
+    # 删除即失效
+    assert c.delete(f"/api/context/{entry.id}").json()["found"] is True
+    assert c.get("/api/context").json()["total"] == 0
+
+    # 可恢复
+    assert c.post(f"/api/context/{entry.id}/restore").json()["found"] is True
+    assert c.get("/api/context").json()["total"] == 1
+
+    # 导出个人上下文（区别于事件记忆导出）
+    r = c.get("/api/context/export")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["counts"]["entries"] == 1
+    assert "attachment" in r.headers.get("content-disposition", "")
+
+
+def test_pause_blocks_conversation_deposit(client):
+    c, store, model = client
+    c.post("/api/privacy", json={"paused": True})
+
+    model.text_queue = ["（这是回答）"]
+    r = c.post("/api/conversation", json={"message": "你好"})
+    data = r.json()
+    assert data["ok"] and data["paused"] is True
+    assert data["deposit"] is None               # 不沉淀
+    assert c.get("/api/context").json()["total"] == 0
+    assert len(model.calls) == 1                 # 只有回答，没有沉淀调用
+    assert c.get("/api/conversation/history").json()["messages"] == []  # 消息不持久化
+
+    c.post("/api/privacy", json={"paused": False})
+    model.text_queue = ["记住了。", _deposit(new=[{"kind": "fact", "content": "用户喜欢猫"}])]
+    c.post("/api/conversation", json={"message": "我喜欢猫"})
+    assert c.get("/api/context").json()["total"] == 1   # 恢复后正常沉淀
+
+
+def test_conversation_model_error_503(client):
+    c, _, model = client
+    from models.base import ModelUnavailableError
+
+    model.fail_with = ModelUnavailableError("连接失败")
+    r = c.post("/api/conversation", json={"message": "你好"})
+    assert r.status_code == 503
+    assert "模型暂不可用" in r.json()["error"]

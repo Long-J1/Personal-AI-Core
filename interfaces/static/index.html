@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Personal AI · Core V0.1</title>
+<title>Personal AI · Core V0.2</title>
 <style>
   :root {
     --bg: #f4f5f8; --card: #ffffff; --ink: #1b1f2a; --muted: #6b7280;
@@ -100,15 +100,27 @@
     border-top-color: var(--accent); border-radius: 50%; animation: sp 1s linear infinite;
     vertical-align: -2px; margin-right: 6px; }
   @keyframes sp { to { transform: rotate(360deg); } }
+  .chatlog { display: flex; flex-direction: column; gap: 8px; max-height: 340px;
+    overflow-y: auto; padding: 4px 2px; }
+  .bubble { max-width: 80%; padding: 9px 13px; border-radius: 13px; font-size: 14px;
+    white-space: pre-wrap; word-break: break-word; }
+  .bubble.user { align-self: flex-end; background: var(--accent); color: #fff;
+    border-bottom-right-radius: 4px; }
+  .bubble.ai { align-self: flex-start; background: #f3f4f6; border-bottom-left-radius: 4px; }
+  .bubble .bmeta { display: block; margin-top: 6px; font-size: 11px; opacity: .72; }
+  .ctxhist { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .ctxhist .tag { max-width: 100%; word-break: break-word; white-space: normal; }
+  .mem button { margin-left: 6px; }
 </style>
 </head>
 <body>
 
 <header>
-  <div class="brand">🧠 Personal AI <span class="ver">Core V0.1</span></div>
+  <div class="brand">🧠 Personal AI <span class="ver">Core V0.2</span></div>
   <div class="badges">
     <span id="recBadge" class="badge">记录中</span>
     <span id="evtBadge" class="badge muted">0 条记忆</span>
+    <span id="ctxBadge" class="badge muted">0 条理解</span>
     <span id="modelBadge" class="badge muted">模型检查中…</span>
   </div>
 </header>
@@ -144,9 +156,22 @@
     </div>
   </section>
 
-  <!-- ② 回忆 -->
+  <!-- ② 对话 -->
   <section class="card">
-    <h2>② 回忆 <small>从记忆库里检索并回答，附带依据</small></h2>
+    <h2>② 对话 <small>带着“它对你的理解”聊天 · 每轮把新理解沉淀回去</small></h2>
+    <div id="chatLog" class="chatlog">
+      <div class="hint" id="chatEmpty">还没有对话。说点什么——你透露的信息会变成它对你的理解（可在 ④ 查看、修改、删除），你说的纠正会立刻改变它之后的判断。</div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <input id="msgInput" type="text" placeholder="例如：我不吃香菜 / 以后别直接给我答案，先给提示">
+      <button id="btnSend" class="primary">发送</button>
+    </div>
+    <div id="chatHint" class="hint" hidden></div>
+  </section>
+
+  <!-- ③ 回忆 -->
+  <section class="card">
+    <h2>③ 回忆 <small>从记忆库里检索并回答，附带依据</small></h2>
     <div class="row">
       <input id="qInput" type="text" placeholder="例如：刚才我在干什么？">
       <button id="btnAsk" class="primary">提问</button>
@@ -164,9 +189,22 @@
     </div>
   </section>
 
-  <!-- ③ 记忆库 -->
+  <!-- ④ 它对你的理解（信任界面） -->
   <section class="card">
-    <h2>③ 记忆库 <small>你拥有它：可查看 · 删除 · 导出 · 暂停</small></h2>
+    <h2>④ 它对你的理解 <small>可查看 · 纠正 · 删除 · 暂停——你拥有对它的解释权</small></h2>
+    <div class="row tools">
+      <button id="btnCtxHistory">📜 变更历史</button>
+      <button id="btnCtxExport">⬇ 导出理解</button>
+      <button id="btnCtxRefresh">↻ 刷新</button>
+    </div>
+    <ul id="ctxList" class="memlist"></ul>
+    <div id="ctxEmpty" class="hint" hidden>还没有任何理解。去 ② 对个话，它才会开始懂你。</div>
+    <div id="ctxHistory" class="ctxhist" hidden></div>
+  </section>
+
+  <!-- ⑤ 记忆库 -->
+  <section class="card">
+    <h2>⑤ 记忆库 <small>你拥有它：可查看 · 删除 · 导出 · 暂停</small></h2>
     <div class="row tools">
       <button id="btnPause">⏸ 暂停记录</button>
       <button id="btnExport">⬇ 导出 JSON</button>
@@ -211,6 +249,7 @@ async function loadStatus() {
     $('recBadge').textContent = s.paused ? '⏸ 已暂停记录' : '● 记录中';
     $('recBadge').className = 'badge' + (s.paused ? ' off' : '');
     $('evtBadge').textContent = s.events + ' 条记忆';
+    $('ctxBadge').textContent = (s.context_entries ?? 0) + ' 条理解';
     const ok = s.model_service_ok;
     $('modelBadge').textContent = ok ? '模型在线' : '模型离线';
     $('modelBadge').className = 'badge' + (ok ? '' : ' off');
@@ -350,6 +389,123 @@ $('qInput').addEventListener('keydown', e => { if (e.key === 'Enter') ask($('qIn
 document.querySelectorAll('.chip').forEach(c =>
   c.addEventListener('click', () => { $('qInput').value = c.dataset.q; ask(c.dataset.q); }));
 
+/* ---------- 对话（V0.2） ---------- */
+let chatSession = null;
+
+function addBubble(role, text, meta) {
+  const empty = $('chatEmpty');
+  if (empty) empty.remove();
+  const div = document.createElement('div');
+  div.className = 'bubble ' + (role === 'user' ? 'user' : 'ai');
+  div.textContent = text;
+  if (meta) {
+    const m = document.createElement('span');
+    m.className = 'bmeta';
+    m.textContent = meta;
+    div.appendChild(m);
+  }
+  $('chatLog').appendChild(div);
+  $('chatLog').scrollTop = $('chatLog').scrollHeight;
+}
+
+async function loadChatHistory() {
+  try {
+    const h = await api('/api/conversation/history');
+    chatSession = h.session_id;
+    if (h.messages.length) $('chatEmpty')?.remove();
+    h.messages.forEach(m => addBubble(m.role === 'user' ? 'user' : 'ai', m.content));
+  } catch (e) { /* 静默 */ }
+}
+
+async function sendMsg() {
+  const text = $('msgInput').value.trim();
+  if (!text) return;
+  $('msgInput').value = '';
+  addBubble('user', text);
+  const hint = $('chatHint');
+  show(hint); hint.className = 'hint';
+  hint.innerHTML = '<span class="spin"></span>思考中…（首次约 20-60 秒）';
+  $('btnSend').disabled = true;
+  try {
+    const r = await api('/api/conversation', {
+      method: 'POST',
+      body: JSON.stringify({ message: text, session_id: chatSession }),
+    });
+    chatSession = r.session_id;
+    let meta = '判断：' + (r.approach || []).join('；');
+    if (r.deposit) {
+      const d = r.deposit, parts = [];
+      if ((d.created || []).length) parts.push('学到 ' + d.created.length + ' 条新理解');
+      if ((d.corrected || []).length) parts.push('按你的纠正更新 ' + d.corrected.length + ' 条');
+      if (d.event_id) parts.push('记入事件记忆');
+      if (d.error) parts.push('沉淀跳过：' + d.error);
+      if (parts.length) meta += ' · ' + parts.join(' · ');
+    } else if (r.paused) {
+      meta += ' · ⏸ 暂停中（本次未沉淀）';
+    }
+    addBubble('ai', r.answer, meta);
+    hint.hidden = true;
+    loadContext(); loadStatus();
+  } catch (e) {
+    hint.textContent = '❌ ' + e.message;
+    hint.className = 'hint warn';
+  } finally {
+    $('btnSend').disabled = false;
+  }
+}
+$('btnSend').addEventListener('click', sendMsg);
+$('msgInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendMsg(); });
+
+/* ---------- 它对你的理解（V0.2 信任界面） ---------- */
+const SRC_LABEL = { chat: '对话', observe: '观察', correction: '你的纠正', manual: '手动', system: '系统' };
+const ACT_LABEL = { create: '学到', correct: '纠正', manual_edit: '手动修改', delete: '删除', restore: '恢复' };
+
+async function loadContext() {
+  try {
+    const r = await api('/api/context');
+    $('ctxEmpty').hidden = r.items.length > 0;
+    $('ctxList').innerHTML = r.items.map(e => `
+      <li class="mem">
+        <span class="when">${esc(e.date)} ${esc(e.time)}</span>
+        <span class="desc">${esc(e.content)}
+          <small>${esc(e.kind_label)} · 来源：${esc(SRC_LABEL[e.source] || e.source)} · 已参与回答 ${e.used_count} 次</small>
+        </span>
+        <span>
+          <button data-ctx-edit="${esc(e.id)}" data-ctx-content="${esc(e.content)}">改</button>
+          <button data-ctx-del="${esc(e.id)}">删除</button>
+        </span>
+      </li>`).join('');
+    $('ctxList').querySelectorAll('[data-ctx-del]').forEach(b =>
+      b.addEventListener('click', async () => {
+        if (!confirm('删除这条理解？删除后它不会再用这条理解组织回答。')) return;
+        await api('/api/context/' + b.dataset.ctxDel, { method: 'DELETE' });
+        loadContext(); loadStatus();
+      }));
+    $('ctxList').querySelectorAll('[data-ctx-edit]').forEach(b =>
+      b.addEventListener('click', async () => {
+        const next = prompt('把这条理解改成什么？', b.dataset.ctxContent);
+        if (!next || next.trim() === b.dataset.ctxContent) return;
+        await api('/api/context/' + b.dataset.ctxEdit,
+          { method: 'PUT', body: JSON.stringify({ content: next.trim() }) });
+        loadContext();
+      }));
+  } catch (e) { /* 静默 */ }
+}
+
+$('btnCtxRefresh').addEventListener('click', loadContext);
+$('btnCtxExport').addEventListener('click', () => window.open('/api/context/export', '_blank'));
+$('btnCtxHistory').addEventListener('click', async () => {
+  const box = $('ctxHistory');
+  if (!box.hidden) { box.hidden = true; return; }
+  try {
+    const r = await api('/api/context/history');
+    box.innerHTML = r.items.length
+      ? r.items.map(h => `<span class="tag">🕒 ${esc((h.iso || '').slice(0, 16).replace('T', ' '))} ${esc(ACT_LABEL[h.action] || h.action)}：${esc(h.content_before || '（新）')} → ${esc(h.content_after || '（已删除）')}</span>`).join('')
+      : '<span class="tag">暂无变更</span>';
+    box.hidden = false;
+  } catch (e) { box.innerHTML = '<span class="tag">读取失败</span>'; box.hidden = false; }
+});
+
 /* ---------- 记忆库 ---------- */
 async function loadMemories() {
   try {
@@ -388,13 +544,13 @@ $('btnClear').addEventListener('click', async () => {
 $('btnPause').addEventListener('click', async () => {
   const s = await api('/api/status');
   const r = await api('/api/privacy', { method: 'POST', body: JSON.stringify({ paused: !s.paused }) });
-  alert(r.paused ? '已暂停记录：不再调用模型、不再保存新记忆（已存记忆保留）。'
-                 : '已恢复记录。');
+  alert(r.paused ? '已暂停：不再观察、不再沉淀新理解/新记忆（已有内容保留，随时可恢复）。对话仍可提问，但本轮学到的东西不会保存。'
+                 : '已恢复记录与沉淀。');
   loadStatus();
 });
 
 /* ---------- 初始化 ---------- */
-loadStatus(); loadMemories();
+loadStatus(); loadMemories(); loadContext(); loadChatHistory();
 setInterval(loadStatus, 15000);
 </script>
 </body>

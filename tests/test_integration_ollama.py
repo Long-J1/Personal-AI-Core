@@ -5,47 +5,19 @@ Ollama 不在运行时自动跳过。运行：
 """
 from __future__ import annotations
 
-import httpx
 import pytest
 
 pytestmark = pytest.mark.reale2e
 
-from core.config import settings
 from core.context import Recaller
 from core.pipeline import CorePipeline
 from memory.store import MemoryStore
-from models.ollama_adapter import OllamaAdapter
 from tests.helpers import make_image
 
 
 @pytest.fixture(autouse=True)
-def require_ollama():
-    try:
-        ok = (
-            httpx.get(
-                f"{settings.ollama_url}/api/version", timeout=3, trust_env=False
-            ).status_code
-            == 200
-        )
-    except Exception:
-        ok = False
-    if not ok:
-        pytest.skip("Ollama 服务未运行，跳过真实端到端测试")
-    # 确认模型存在
-    try:
-        tags = httpx.get(
-            f"{settings.ollama_url}/api/tags", timeout=5, trust_env=False
-        ).json()
-        names = [t.get("name", "") for t in tags.get("models", [])]
-        if settings.model not in names:
-            pytest.skip(f"模型不存在：{settings.model}")
-    except Exception:
-        pass
-
-
-@pytest.fixture
-def real_model():
-    return OllamaAdapter(settings.ollama_url, settings.model, settings.understand_timeout)
+def _require(require_ollama):
+    pass
 
 
 def test_real_observe_then_recall(tmp_path, monkeypatch, real_model):
