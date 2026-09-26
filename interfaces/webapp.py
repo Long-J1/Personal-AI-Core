@@ -8,16 +8,20 @@ from __future__ import annotations
 import base64
 import logging
 import re
+import shutil
+import tempfile
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, File, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
-from core.config import DB_PATH, ensure_dirs, settings
+from core.config import DATA_DIR, DB_PATH, THUMB_DIR, ensure_dirs, settings
 from core.context import Recaller
 from core.conversation import ConversationService
+from core.data_manager import DataManager, DataError
 from core.pipeline import CorePipeline
 from memory.chat_store import ChatStore
 from memory.context_store import ContextStore
@@ -73,6 +77,10 @@ class ModelSettingsRequest(BaseModel):
     openai: OpenAICfg | None = None
 
 
+class RestoreRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
 class PrivacyRequest(BaseModel):
     paused: bool
 
@@ -100,6 +108,8 @@ def create_app(
     model = model or default_model()
     # 模型设置的读写目标：注册表自带存储（测试可注入 tmp 路径），否则用默认存储
     model_settings_store = getattr(model, "settings_store", None) or default_store()
+    # 数据管理（阶段2：导出/备份/恢复/导入）——全部发生在数据目录内
+    data_mgr = DataManager(Path(DATA_DIR), Path(THUMB_DIR))
     context_store = context_store or ContextStore(store.db_path)
     chat_store = chat_store or ChatStore(store.db_path)
     pipeline = CorePipeline(store, model)
@@ -181,6 +191,63 @@ def create_app(
         return {"ok": bool(ok), "detail": detail,
                 "provider": cfg["provider"],
                 "model": getattr(adapter, "model", "")}
+
+    # ---------- 数据管理（阶段2：导出/备份/恢复/导入，D010） ----------
+    @app.get("/api/data/location")
+    def data_location() -> dict:
+        return {"ok": True, **data_mgr.location()}
+
+    @app.get("/api/data/export")
+    def data_export():
+        try:
+            zip_path = data_mgr.export()
+        except DataError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return FileResponse(
+            zip_path,
+            media_type="application/zip",
+            filename=zip_path.name,
+            background=BackgroundTask(shutil.rmtree, zip_path.parent, ignore_errors=True),
+        )
+
+    @app.get("/api/data/backups")
+    def data_backups() -> dict:
+        return {"ok": True, "items": data_mgr.list_backups()}
+
+    @app.post("/api/data/backup")
+    def data_backup():
+        try:
+            name = data_mgr.create_backup()
+        except (DataError, OSError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return {"ok": True, "name": name, "items": data_mgr.list_backups()}
+
+    @app.post("/api/data/restore")
+    def data_restore(req: RestoreRequest):
+        try:
+            result = data_mgr.restore(from_backup=req.name)
+        except DataError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        if isinstance(model, ModelRegistry):
+            model.reload()   # 模型设置也随包恢复，门面跟上
+        return {"ok": True, **result}
+
+    @app.post("/api/data/import")
+    async def data_import(file: UploadFile = File(...)):
+        tmp_dir = Path(tempfile.mkdtemp(prefix="pai_upload_"))
+        tmp = tmp_dir / (Path(file.filename or "import.zip").name)
+        try:
+            tmp.write_bytes(await file.read())
+            result = data_mgr.restore(source=tmp)
+        except DataError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        except OSError as exc:
+            return JSONResponse({"ok": False, "error": f"读取上传文件失败：{exc}"}, status_code=400)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        if isinstance(model, ModelRegistry):
+            model.reload()
+        return {"ok": True, **result}
 
     # ---------- 感知 → 理解 → 记忆 ----------
     @app.post("/api/observe")

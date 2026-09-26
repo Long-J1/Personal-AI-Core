@@ -249,6 +249,24 @@
     <div id="mdHint" class="hint" hidden></div>
     <div class="hint">API Key 只保存在这台电脑的数据目录，不会写进代码、不会上传、不会明文显示。切换模型不会动你的记忆、对话和理解。</div>
   </section>
+
+  <!-- ⑦ 数据与备份（阶段2） -->
+  <section class="card">
+    <h2>⑦ 数据与备份 <small>换电脑、换模型、换外壳——带上这个包，它还是那个它</small></h2>
+    <div class="row tools">
+      <button id="btnDataExport">⬇ 导出全部数据</button>
+      <button id="btnDataBackup">🛡 创建备份</button>
+      <label class="filebtn">📥 导入数据包
+        <input type="file" id="dataImport" accept=".zip" hidden>
+      </label>
+      <button id="btnDataRefresh">↻ 刷新备份</button>
+    </div>
+    <div class="hint" id="dataLoc">数据位置：读取中…</div>
+    <ul id="backupList" class="memlist"></ul>
+    <div id="backupEmpty" class="hint" hidden>还没有备份。点「创建备份」给现在的它拍张快照。</div>
+    <div id="dataHint" class="hint" hidden></div>
+    <div class="hint">卸载软件不会删除数据目录里的内容；恢复/导入前会自动给当前数据拍一张安全网备份。导出包内含模型设置（可能含 API Key），请自行妥善保管。</div>
+  </section>
 </main>
 
 <footer>本地运行 · 所有记忆只保存在这台电脑的 data/personal_ai.db · 模型服务：<span id="footModel">-</span></footer>
@@ -660,8 +678,82 @@ $('btnMdSave').addEventListener('click', async () => {
   } finally { busy(btn, false); }
 });
 
+/* ---------- 数据与备份（阶段2） ---------- */
+function dataHint(text, bad) {
+  const el = $('dataHint');
+  el.hidden = false;
+  el.textContent = (bad ? '❌ ' : '✅ ') + text;
+  el.className = 'hint' + (bad ? ' warn' : '');
+}
+
+async function loadDataInfo() {
+  try {
+    const loc = await api('/api/data/location');
+    $('dataLoc').textContent = `数据位置：${loc.data_dir} · ${(loc.size_bytes / 1024 / 1024).toFixed(1)} MB`;
+  } catch (e) {
+    $('dataLoc').textContent = '数据位置读取失败：' + e.message;
+  }
+  try {
+    const r = await api('/api/data/backups');
+    $('backupEmpty').hidden = r.items.length > 0;
+    $('backupList').innerHTML = r.items.map(b => `
+      <li class="mem">
+        <span class="when">${esc((b.created_at || '').slice(0, 16).replace('T', ' '))}</span>
+        <span class="desc">${esc(b.name)}<small>${(b.size_bytes / 1024 / 1024).toFixed(2)} MB</small></span>
+        <button data-restore="${esc(b.name)}">恢复</button>
+      </li>`).join('');
+    $('backupList').querySelectorAll('[data-restore]').forEach(btn =>
+      btn.addEventListener('click', async () => {
+        if (!confirm(`⚠️ 用备份「${btn.dataset.restore}」覆盖当前全部数据？\n当前数据会先自动存一张安全网备份，可再切回来。`)) return;
+        busy(btn, true, '恢复中…');
+        try {
+          const r2 = await api('/api/data/restore', { method: 'POST', body: JSON.stringify({ name: btn.dataset.restore }) });
+          dataHint(`已恢复（安全网：${r2.safety_backup || '无'}）· 理解 ${r2.counts?.context_entries ?? '?'} 条 · 记忆 ${r2.counts?.events ?? '?'} 条`, false);
+          loadStatus(); loadMemories(); loadContext(); loadChatHistory(); loadModelSettings(); loadDataInfo();
+        } catch (e) {
+          dataHint(e.message, true);
+        } finally { busy(btn, false); }
+      }));
+  } catch (e) { /* 顶部状态已提示 */ }
+}
+
+$('btnDataExport').addEventListener('click', () => window.open('/api/data/export', '_blank'));
+
+$('btnDataBackup').addEventListener('click', async () => {
+  const btn = $('btnDataBackup');
+  busy(btn, true, '备份中…');
+  try {
+    const r = await api('/api/data/backup', { method: 'POST' });
+    dataHint('已创建备份：' + r.name, false);
+    loadDataInfo();
+  } catch (e) {
+    dataHint(e.message, true);
+  } finally { busy(btn, false); }
+});
+
+$('dataImport').addEventListener('change', async (ev) => {
+  const f = ev.target.files[0];
+  ev.target.value = '';
+  if (!f) return;
+  if (!confirm('⚠️ 导入会用数据包覆盖当前全部数据（当前数据先自动存安全网备份）。确定？')) return;
+  dataHint('导入中…', false);
+  try {
+    const fd = new FormData();
+    fd.append('file', f);
+    const res = await fetch('/api/data/import', { method: 'POST', body: fd });
+    const r = await res.json().catch(() => null);
+    if (!res.ok || !r?.ok) throw new Error(r?.error || ('导入失败（HTTP ' + res.status + '）'));
+    dataHint(`导入成功 · 理解 ${r.counts?.context_entries ?? '?'} 条 · 记忆 ${r.counts?.events ?? '?'} 条`, false);
+    loadStatus(); loadMemories(); loadContext(); loadChatHistory(); loadModelSettings(); loadDataInfo();
+  } catch (e) {
+    dataHint(e.message, true);
+  }
+});
+
+$('btnDataRefresh').addEventListener('click', loadDataInfo);
+
 /* ---------- 初始化 ---------- */
-loadStatus(); loadMemories(); loadContext(); loadChatHistory(); loadModelSettings();
+loadStatus(); loadMemories(); loadContext(); loadChatHistory(); loadModelSettings(); loadDataInfo();
 setInterval(loadStatus, 15000);
 </script>
 </body>
