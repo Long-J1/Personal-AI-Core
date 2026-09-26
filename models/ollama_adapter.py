@@ -85,3 +85,30 @@ class OllamaAdapter(BaseModelAdapter):
             return httpx.get(f"{self.url}/api/version", timeout=timeout, trust_env=False).status_code == 200
         except httpx.HTTPError:
             return False
+
+    def test_connection(self, timeout: float = 5.0) -> tuple[bool, str]:
+        """连接测试（模型设置界面用）：服务在不在 + 模型装没装。"""
+        try:
+            resp = httpx.get(f"{self.url}/api/version", timeout=timeout, trust_env=False)
+        except httpx.HTTPError as exc:
+            return False, f"无法连接 Ollama（{self.url}）：{exc}"
+        if resp.status_code != 200:
+            return False, f"Ollama 返回 {resp.status_code}"
+        try:
+            version = resp.json().get("version", "?")
+        except ValueError:
+            version = "?"
+        try:
+            tags = httpx.get(f"{self.url}/api/tags", timeout=timeout, trust_env=False).json()
+            names = [t.get("name", "") for t in tags.get("models", [])]
+        except (httpx.HTTPError, ValueError):
+            return True, f"Ollama {version} 在线（模型清单暂不可读）"
+        if self.model and not any(
+            n == self.model or n.startswith(self.model) for n in names
+        ):
+            return False, f"Ollama {version} 在线，但本机没有模型「{self.model}」"
+        return True, f"Ollama {version} · {self.model}"
+
+
+# 别名：任务书里的 OllamaProvider 就是这个类（保留原名不破坏既有导入）
+OllamaProvider = OllamaAdapter

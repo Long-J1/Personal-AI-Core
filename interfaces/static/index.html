@@ -49,11 +49,17 @@
   button.primary:hover:not(:disabled) { filter: brightness(1.1); color: #fff; }
   button.danger { color: var(--bad); }
   button.danger:hover { border-color: var(--bad); background: #fef2f2; }
-  input[type=text], input:not([type]) {
+  input[type=text], input:not([type]), input[type=password], input[type=url] {
     flex: 1; min-width: 220px; border: 1px solid var(--line); border-radius: 9px;
     padding: 9px 12px; font-size: 14px; font-family: inherit; outline: none;
   }
   input:focus { border-color: var(--accent); }
+  select {
+    border: 1px solid var(--line); border-radius: 9px; padding: 9px 12px;
+    font-size: 14px; font-family: inherit; outline: none; background: #fff; color: var(--ink);
+  }
+  select:focus { border-color: var(--accent); }
+  label.fld { font-size: 13px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
   video { width: 100%; max-height: 320px; border-radius: 10px; background: #000; margin-top: 10px; }
   .hint { font-size: 13px; color: var(--muted); margin-top: 10px; }
   .hint.warn { color: var(--warn); }
@@ -213,6 +219,35 @@
     </div>
     <ul id="memList" class="memlist"></ul>
     <div id="memEmpty" class="hint" hidden>还没有记忆。去 ① 里拍一张或传一张图试试。</div>
+  </section>
+
+  <!-- ⑥ 模型设置（D009：模型可换，它对你的理解不换） -->
+  <section class="card">
+    <h2>⑥ 模型设置 <small>换模型不换"它"——Personal Context 与模型无关</small></h2>
+    <div class="hint" id="modelNow">当前正在使用：读取中…</div>
+    <div class="row" style="margin-top:10px">
+      <label class="fld">Provider
+        <select id="mdProvider">
+          <option value="ollama">本地 Ollama</option>
+          <option value="openai">云端 API（OpenAI-compatible）</option>
+        </select>
+      </label>
+    </div>
+    <div class="row" id="mdOllamaBox" style="margin-top:10px">
+      <input id="mdOllamaUrl" type="text" placeholder="Ollama 地址，如 http://127.0.0.1:11434">
+      <input id="mdOllamaModel" type="text" placeholder="模型名">
+    </div>
+    <div class="row" id="mdOpenaiBox" style="margin-top:10px" hidden>
+      <input id="mdBaseUrl" type="text" placeholder="API Base URL，如 https://api.siliconflow.cn/v1">
+      <input id="mdOpenaiModel" type="text" placeholder="模型名">
+      <input id="mdApiKey" type="password" placeholder="API Key（留空 = 不修改）" autocomplete="new-password">
+    </div>
+    <div class="row tools" style="margin-top:10px">
+      <button id="btnMdTest">🔌 测试连接</button>
+      <button id="btnMdSave" class="primary">💾 保存设置</button>
+    </div>
+    <div id="mdHint" class="hint" hidden></div>
+    <div class="hint">API Key 只保存在这台电脑的数据目录，不会写进代码、不会上传、不会明文显示。切换模型不会动你的记忆、对话和理解。</div>
   </section>
 </main>
 
@@ -549,8 +584,84 @@ $('btnPause').addEventListener('click', async () => {
   loadStatus();
 });
 
+/* ---------- 模型设置（D009） ---------- */
+const MD_LABEL = { ollama: '本地 Ollama', openai: '云端 API' };
+
+function mdToggle() {
+  const p = $('mdProvider').value;
+  $('mdOllamaBox').hidden = p !== 'ollama';
+  $('mdOpenaiBox').hidden = p !== 'openai';
+}
+
+async function loadModelSettings() {
+  try {
+    const s = await api('/api/model/settings');
+    $('mdProvider').value = s.provider;
+    mdToggle();
+    $('mdOllamaUrl').value = s.ollama.url;
+    $('mdOllamaModel').value = s.ollama.model;
+    $('mdBaseUrl').value = s.openai.base_url;
+    $('mdOpenaiModel').value = s.openai.model;
+    $('mdApiKey').value = '';
+    $('mdApiKey').placeholder = s.openai.api_key_set
+      ? `API Key（已保存 ${s.openai.api_key_masked}，留空不修改）`
+      : 'API Key（首次填写）';
+    const cur = s.current || {};
+    const label = MD_LABEL[cur.provider] || cur.provider || '未知';
+    $('modelNow').textContent = '当前正在使用：' + label + (cur.model ? ' / ' + cur.model : '')
+      + (cur.error ? '（' + cur.error + '）' : '');
+  } catch (e) {
+    $('modelNow').textContent = '读取模型设置失败：' + e.message;
+  }
+}
+
+function mdCollect() {
+  const body = {
+    provider: $('mdProvider').value,
+    ollama: { url: $('mdOllamaUrl').value.trim(), model: $('mdOllamaModel').value.trim() },
+    openai: { base_url: $('mdBaseUrl').value.trim(), model: $('mdOpenaiModel').value.trim() },
+  };
+  const key = $('mdApiKey').value.trim();
+  if (key) body.openai.api_key = key;   // 不带 api_key 字段 = 不修改已保存的 Key
+  return body;
+}
+
+function mdHint(text, bad) {
+  const el = $('mdHint');
+  el.hidden = false;
+  el.textContent = (bad ? '❌ ' : '✅ ') + text;
+  el.className = 'hint' + (bad ? ' warn' : '');
+}
+
+$('mdProvider').addEventListener('change', mdToggle);
+
+$('btnMdTest').addEventListener('click', async () => {
+  const btn = $('btnMdTest');
+  busy(btn, true, '测试中…');
+  try {
+    const r = await api('/api/model/test', { method: 'POST', body: JSON.stringify(mdCollect()) });
+    mdHint(r.detail || (r.ok ? '连接成功' : '连接失败'), !r.ok);
+  } catch (e) {
+    mdHint(e.message, true);
+  } finally { busy(btn, false); }
+});
+
+$('btnMdSave').addEventListener('click', async () => {
+  const btn = $('btnMdSave');
+  busy(btn, true, '保存中…');
+  try {
+    const r = await api('/api/model/settings', { method: 'PUT', body: JSON.stringify(mdCollect()) });
+    $('mdApiKey').value = '';
+    await loadModelSettings();
+    loadStatus();
+    mdHint('已保存。当前正在使用：' + ((MD_LABEL[r.current.provider] || r.current.provider) + (r.current.model ? ' / ' + r.current.model : '')), false);
+  } catch (e) {
+    mdHint(e.message, true);
+  } finally { busy(btn, false); }
+});
+
 /* ---------- 初始化 ---------- */
-loadStatus(); loadMemories(); loadContext(); loadChatHistory();
+loadStatus(); loadMemories(); loadContext(); loadChatHistory(); loadModelSettings();
 setInterval(loadStatus, 15000);
 </script>
 </body>

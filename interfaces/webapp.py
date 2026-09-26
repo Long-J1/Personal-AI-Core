@@ -23,7 +23,8 @@ from memory.chat_store import ChatStore
 from memory.context_store import ContextStore
 from memory.store import MemoryStore
 from models.base import BaseModelAdapter, ModelError
-from models.ollama_adapter import OllamaAdapter
+from models.factory import ModelRegistry, build_model
+from models.settings_store import default_store, public_view
 from perception.base import PerceptionError
 from perception.image_file import normalize_image
 
@@ -54,12 +55,38 @@ class ContextUpdateRequest(BaseModel):
     content: str = Field(min_length=1, max_length=500)
 
 
+# ---------- 模型设置（D009） ----------
+class OllamaCfg(BaseModel):
+    url: str | None = None
+    model: str | None = None
+
+
+class OpenAICfg(BaseModel):
+    base_url: str | None = None
+    model: str | None = None
+    api_key: str | None = None   # None=不修改；""=清除
+
+
+class ModelSettingsRequest(BaseModel):
+    provider: str | None = None          # ollama | openai
+    ollama: OllamaCfg | None = None
+    openai: OpenAICfg | None = None
+
+
 class PrivacyRequest(BaseModel):
     paused: bool
 
 
-def default_model() -> OllamaAdapter:
-    return OllamaAdapter(settings.ollama_url, settings.model, settings.understand_timeout)
+def default_model() -> ModelRegistry:
+    """默认模型门面：从数据目录的设置装配，可热切换 Provider（D009）。"""
+    return ModelRegistry()
+
+
+def _describe(model: BaseModelAdapter) -> dict:
+    """当前模型描述（不泄露 API Key）。"""
+    if isinstance(model, ModelRegistry):
+        return model.describe()
+    return {"provider": getattr(model, "name", "unknown"), "model": getattr(model, "model", "")}
 
 
 def create_app(
@@ -71,6 +98,8 @@ def create_app(
     ensure_dirs()
     store = store or MemoryStore(DB_PATH)
     model = model or default_model()
+    # 模型设置的读写目标：注册表自带存储（测试可注入 tmp 路径），否则用默认存储
+    model_settings_store = getattr(model, "settings_store", None) or default_store()
     context_store = context_store or ContextStore(store.db_path)
     chat_store = chat_store or ChatStore(store.db_path)
     pipeline = CorePipeline(store, model)
@@ -108,12 +137,50 @@ def create_app(
         return {
             "version": settings.version,
             "model": getattr(model, "model", getattr(model, "name", "unknown")),
+            "provider": _describe(model)["provider"],
             "events": store.count_events(),
             "context_entries": context_store.count_active(),
             "sessions": chat_store.count_sessions(),
             "paused": store.paused,
             "model_service_ok": service_ok,
         }
+
+    # ---------- 模型设置（D009：换模型不换"它"） ----------
+    @app.get("/api/model/settings")
+    def get_model_settings() -> dict:
+        cfg = model_settings_store.load()
+        return {"ok": True, **public_view(cfg), "current": _describe(model)}
+
+    @app.put("/api/model/settings")
+    def put_model_settings(req: ModelSettingsRequest):
+        try:
+            cfg = model_settings_store.update(req.model_dump(exclude_none=True))
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        if isinstance(model, ModelRegistry):
+            model.reload()   # 只换推理引擎；Context/事件/会话一概不动
+        return {"ok": True, **public_view(cfg), "current": _describe(model)}
+
+    @app.post("/api/model/test")
+    def test_model_settings(req: ModelSettingsRequest | None = None) -> dict:
+        """连接测试：可用保存前的临时配置测试，不落盘。"""
+        try:
+            cfg = model_settings_store.resolve(req.model_dump(exclude_none=True)) if req else model_settings_store.load()
+            adapter = build_model(cfg, timeout=10.0)
+        except ValueError as exc:
+            return {"ok": False, "detail": str(exc)}
+        except ModelError as exc:
+            return {"ok": False, "detail": str(exc)}
+        tester = getattr(adapter, "test_connection", None)
+        if not callable(tester):
+            return {"ok": False, "detail": "该 Provider 不支持连接测试"}
+        try:
+            ok, detail = tester(timeout=8.0)
+        except Exception as exc:  # 连接测试绝不许把服务打崩
+            ok, detail = False, f"测试失败：{exc}"
+        return {"ok": bool(ok), "detail": detail,
+                "provider": cfg["provider"],
+                "model": getattr(adapter, "model", "")}
 
     # ---------- 感知 → 理解 → 记忆 ----------
     @app.post("/api/observe")

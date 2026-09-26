@@ -112,7 +112,9 @@ def test_recall_keyword_cascade_keeps_time_window(store, recaller, mock_model):
 
 
 def test_recall_falls_back_to_all_when_window_empty(store, recaller, mock_model):
-    _seed(store, "很久以前修好了电脑", minutes=600)
+    # 固定 36 小时前：无论几点跑，都必然落在"今天"窗口之外（原先 10 小时前的写法
+    # 在 11 点后会落进当天窗口导致误报——时间炸弹，D009 阶段1修复）
+    _seed(store, "很久以前修好了电脑", minutes=60 * 36)
     ans = recaller.recall("今天我修电脑了吗")
     assert ans.retrieved_count == 1
     assert ans.fallback_used and "全部" in ans.fallback_used
