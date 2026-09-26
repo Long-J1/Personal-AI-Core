@@ -1,5 +1,8 @@
 # 🧠 Personal AI Core V0.2
 
+> 🌐 **官网**：https://long-j1.github.io/ ｜ **下载 Windows 版 v0.2.0**：[直链下载](https://github.com/Long-J1/Personal-AI-Core/releases/download/v0.2.0/PersonalAI-Setup-0.2.0.exe)（[使用指南](https://long-j1.github.io/guide/) · [常见问题](https://long-j1.github.io/faq/) · [更新日志](https://long-j1.github.io/changelog/)）
+> License: [MIT](./LICENSE)
+
 > “做一个人的 AI，眼镜只是它长出来的第一只眼睛。”
 > 依据《Personal AI：真正属于你的 AI｜Agent 执行总任务书 V1.0》与 `docs/PRODUCT_TRUTH.md` 交付。
 
@@ -21,8 +24,8 @@
 
 不用 Python、不用命令行、不用 `python run.py`：
 
-1. **双击安装包** `desktop\dist\PersonalAI-Setup-0.2.0.exe`
-   → 下一步 → 完成（装到 `%LOCALAPPDATA%\Programs\Personal AI`，无需管理员权限）；
+1. **下载安装包**：[官网下载页](https://long-j1.github.io/download/) 或 [GitHub Release](https://github.com/Long-J1/Personal-AI-Core/releases/tag/v0.2.0)（得到 `PersonalAI-Setup-0.2.0.exe`）
+   → 双击 → 下一步 → 完成（装到 `%LOCALAPPDATA%\Programs\Personal AI`，无需管理员权限）；
 2. **双击桌面或开始菜单的 "Personal AI"**——窗口自动拉起内置 Core 并打开界面；
 3. 开始使用。页面七块：
 
