@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Personal AI 启动失败</title>
+<style>
+  :root { --bad: #dc2626; --muted: #6b7280; --accent: #4f46e5; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px; padding: 24px;
+    background: #f4f5f8; color: #1b1f2a;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  .card {
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 14px;
+    padding: 26px 30px; max-width: 640px; width: 100%;
+    box-shadow: 0 1px 3px rgba(0,0,0,.05);
+  }
+  h1 { font-size: 20px; margin: 0 0 6px; }
+  h1 .ico { margin-right: 8px; }
+  #msg { font-size: 15px; color: var(--bad); font-weight: 600; }
+  #detail { font-size: 13px; color: var(--muted); margin-top: 10px; word-break: break-all; }
+  #logDir { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  #output {
+    display: none; margin-top: 12px; padding: 10px 12px; background: #f9fafb;
+    border: 1px solid #e5e7eb; border-radius: 8px; font-family: Consolas, monospace;
+    font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow: auto;
+  }
+  .row { display: flex; gap: 10px; margin-top: 18px; }
+  button {
+    border: 1px solid #e5e7eb; background: #fff; color: #1b1f2a; border-radius: 9px;
+    padding: 9px 16px; font-size: 14px; cursor: pointer; font-family: inherit;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .hint { font-size: 12px; color: #9aa1ad; margin-top: 14px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1><span class="ico">⚠️</span>Personal AI 没能启动</h1>
+    <div id="msg">正在读取错误信息…</div>
+    <div id="detail"></div>
+    <div id="logDir"></div>
+    <pre id="output"></pre>
+    <div class="row">
+      <button class="primary" id="btnRetry">🔄 重试</button>
+      <button id="btnLogs">📁 打开日志文件夹</button>
+      <button id="btnOutput">查看技术细节</button>
+    </div>
+    <div class="hint">你的个人数据是安全的——它保存在数据目录，与程序文件分开。</div>
+  </div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let info = {};
+  const CODE_TIPS = {
+    'port-conflict': '有别的程序占用了 Personal AI 需要的端口。可以试试重启电脑，或结束占用该端口的程序后重试。',
+    'core-failed': 'Core 程序启动后立刻退出了。日志里通常有具体原因。',
+    'spawn-timeout': 'Core 启动超时。如果刚开机，电脑可能还在忙，稍等片刻再重试。',
+    'spawn-failed': '找不到 Core 程序文件，安装可能不完整，建议重新安装。',
+    'core-crashed': 'Core 运行中意外退出。如果反复出现，请把日志反馈给开发者。',
+  };
+  if (window.pai && window.pai.onError) {
+    window.pai.onError((e) => {
+      info = e || {};
+      $('msg').textContent = info.message || '未知错误';
+      $('detail').textContent = CODE_TIPS[info.code] || '';
+      $('logDir').textContent = info.logDir ? '日志位置：' + info.logDir : '';
+      if (info.output) $('output').textContent = info.output;
+    });
+  }
+  $('btnRetry').addEventListener('click', async () => {
+    $('btnRetry').disabled = true;
+    $('btnRetry').textContent = '重试中…';
+    try { await (window.pai && window.pai.retry()); }
+    finally { $('btnRetry').disabled = false; $('btnRetry').textContent = '🔄 重试'; }
+  });
+  $('btnLogs').addEventListener('click', () => window.pai && window.pai.openLogs());
+  $('btnOutput').addEventListener('click', () => {
+    const el = $('output');
+    el.style.display = el.style.display === 'block' ? 'none' : 'block';
+  });
+</script>
+</body>
+</html>

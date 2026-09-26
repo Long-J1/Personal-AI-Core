@@ -11,10 +11,11 @@ from pathlib import Path
 # 项目根目录（本文件在 core/ 下）
 ROOT = Path(__file__).resolve().parent.parent
 
+# 数据/日志目录与安装目录分离（桌面版：由外壳指到 %APPDATA%\Personal AI，D011）
 DATA_DIR = Path(os.environ.get("PAI_DATA_DIR") or (ROOT / "data"))
 THUMB_DIR = DATA_DIR / "thumbs"
 DB_PATH = DATA_DIR / "personal_ai.db"
-LOG_DIR = ROOT / "logs"
+LOG_DIR = Path(os.environ.get("PAI_LOG_DIR") or (ROOT / "logs"))
 
 # 本机 Ollama 里实测可看图的模型（见 docs/decisions/D002）
 DEFAULT_MODEL = "hf.co/HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive:Q4_K_M"
