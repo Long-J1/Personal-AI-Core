@@ -36,7 +36,8 @@
       "target": [
         "nsis"
       ],
-      "artifactName": "PersonalAI-Setup-${version}.exe"
+      "artifactName": "PersonalAI-Setup-${version}.exe",
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": false,

@@ -7,3 +7,6 @@ logs/
 *.db
 *.db-wal
 *.db-shm
+build/
+desktop/build/
+desktop/dist/
