@@ -65,8 +65,8 @@ hypothesis_log(id, epoch, iso, action, hypothesis_id,
 - `excerpt` 存来源内容快照：原行被删也能解释"当时为什么这么想"。
 - **独立源定义（保守版）**：`origin` 分组键去重计数。
   - event 证据：`event:<event_id>`（每次事件都是一次独立发生）
-  - context 证据：`ctxday:<YYYY-MM-DD>`（同日多条只算 1 个源——宁可保守）
-  - correction 证据：`correction:<source_id>:<day>`（每次用户纠正都是一次独立用户行为）
+  - context 证据：`ctxday:<来源行日期>`（**按来源行的发生日，不按写入日**——不同天产生的两条理解各算各的；同日多条只算 1 个源）
+  - correction 证据：`correction:<source_id>:<行为当天>`（每次用户纠正都是一次独立用户行为）
 - 同一次归纳批量链接的多行若 origin 相同，只计 1 个独立源（防"一次对话 3 条 Context 冒充 3 个证据"）。
 
 ## 六、Confidence 数学（常量，`memory/hypothesis_store.py` 顶部）
@@ -87,7 +87,8 @@ hypothesis_log(id, epoch, iso, action, hypothesis_id,
 
 - **R1 活动重复**：相同非空 `activity` 的事件 ≥ 3 → 假设"用户近期多次进行「X」相关活动（n 次），可能正处在相关事项的持续期。"scope=`activity:X`，证据=这些事件。
 - **R2 相处偏好主题**：≥ 2 条 active interaction 条目共享关键词（`extract_keywords`，≥2 字）→ 假设"用户在「kw」方面多次表达过相处偏好（n 条），可能希望 AI 在此类场景保持一致。"scope=`interaction:kw`，证据=这些条目。
-- **去重**：同 scope 已有 active 假设 → 不新建，只链接新增证据（走正常置信度路径）。
+- **去重**：同 scope 已有 tentative/confirmed → 不新建，只链接新增证据；
+  同 scope 仅有 rejected → **跳过（尊重否决，不新建、不喂料、不打扰）**。
 - 触发点：`conversation.chat` 沉淀完成后，后台静默跑（try/except 包住，只记日志，绝不打断对话）；另提供 `induce_all()` 供测试/验收直调。
 - 阈值全是模块常量。
 
@@ -137,7 +138,8 @@ hypothesis_log(id, epoch, iso, action, hypothesis_id,
 
 - 真库数据太薄，短期内归纳器产出为 0 是预期行为，不是 bug。
 - R2 关键词共享是字面匹配（沿用 `extract_keywords`），语义相近但用词不同归纳不出来——V0.4+ 实验方向，不在本版。
-- 同日 collapse 偏保守：真·一日多独立场景会被低估，换来的是不自嗨（§十二要求）。
+- 同日折叠偏保守：真·一日多独立场景会被低估，换来的是不自嗨（§十二要求）。
+- 否决词是子串规则："别"先剥离特别/别人等常用词，仍可能误伤生僻组合——否决后用户可在信任界面恢复/确认，影响可逆。
 
 ## 十四、Future work（记录，不实现）
 

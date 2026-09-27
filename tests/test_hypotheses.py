@@ -295,3 +295,60 @@ def test_deny_word_boundaries(hyp, ctx):
     entry_id = hyp.get_detail(h.id)["evidence"][0]["source_id"]
     hyp.record_correction_hit(entry_id, "是不是记错了时间？")
     assert hyp.get(h.id).status == "tentative"
+
+
+# ---------- bugfix 回归（2026-09-27 扫 bug） ----------
+
+def test_origin_uses_source_row_date(hyp, ctx):
+    """默认 origin 取来源行的发生日，不取写入日."""
+    import sqlite3
+    h, _ = hyp.create("用户可能接受提前提醒", "interaction:提醒")
+    e1 = _ctx_entry(ctx, "提醒偏好甲")
+    e2 = _ctx_entry(ctx, "提醒偏好乙")
+    # 把 e2 的创建时间拨到昨天（模拟不同天产生的两条理解）
+    con = sqlite3.connect(str(ctx.db_path))
+    con.execute(
+        "UPDATE context_entries SET created_at_iso='2026-01-01T10:00:00+08:00'"
+        " WHERE id=?", (e2.id,))
+    con.commit()
+    con.close()
+    assert hyp.add_evidence(h.id, "support", "context", e1.id)[0]
+    assert hyp.add_evidence(h.id, "support", "context", e2.id)[0]
+    assert hyp.get_detail(h.id)["independent_sources"] == 2
+
+
+def test_reject_idempotent(hyp, ctx):
+    """重复否决不刷证据数（防双击膨胀）."""
+    h = _hypo_with_ctx_support(hyp, ctx, n=1)
+    assert hyp.reject(h.id, reason="不需要") is True
+    assert hyp.reject(h.id, reason="还是不需要") is True
+    h = hyp.get(h.id)
+    assert h.contradict_count == 1
+    assert h.confidence == pytest.approx(0.25)
+
+
+def test_scope_truncation_dedup(hyp):
+    """超长 scope 去重不 miss（写入与查找同一切断）."""
+    long_scope = "activity:" + "写" * 200
+    h, _ = hyp.create("长活动假设", long_scope)
+    found = hyp.find_by_scope(long_scope)
+    assert [x.id for x in found] == [h.id]
+
+
+def test_bie_stripped_in_non_denials(hyp, ctx):
+    """'别'只在真否决时生效：特别/别人不算，别提醒算."""
+    from memory.hypothesis_store import _is_explicit_denial
+    assert _is_explicit_denial("这很特别") is False
+    assert _is_explicit_denial("别人也是这样") is False
+    assert _is_explicit_denial("别再提醒我了") is True
+
+
+def test_export_and_clear_all(hyp, ctx):
+    h = _hypo_with_ctx_support(hyp, ctx, n=1)
+    data = hyp.export_all()
+    assert data["counts"]["hypotheses"] == 1
+    assert data["hypotheses"][0]["id"] == h.id
+    assert len(data["evidence"]) == 1
+    assert hyp.clear_all() == 1
+    assert hyp.count_live() == 0
+    assert hyp.get_detail(h.id) is None

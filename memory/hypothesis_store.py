@@ -32,6 +32,7 @@ CONF_MIN = 0.0
 CONF_MAX = 1.0
 MIN_INDEPENDENT_FOR_HIGH = 2   # 独立支持源 < 2 → 不许超过 HIGH_CONF_CAP
 HIGH_CONF_CAP = 0.70
+SCOPE_MAX = 120                # scope 写入与查找统一截断（防超长 activity 导致去重 miss）
 
 # ---------- 状态机 ----------
 STATUSES = ("tentative", "confirmed", "rejected", "deleted")
@@ -111,8 +112,10 @@ def _clamp(v: float) -> float:
 # 显式否决词（用户亲口否定假设时触发置位 + rejected，确定性规则，可测）
 DENY_KEYWORDS = ("不对", "不是", "没有", "别", "不要", "错了", "纠正", "胡说")
 # 否决词扫描前的剥离项：疑问句式（是不是/有没有）与自述笔误（记错）不算否决，
-# 否则"记错了""是不是这样"会被误判为显式否决
-_DENY_STRIP = ("是不是", "有没有", "记错")
+# 否则"记错了""是不是这样"会被误判为显式否决；
+# "别"是单字高危：先剥离常见非否决词（特别/别人/…），剩下的"别…"才算否决
+_DENY_STRIP = ("是不是", "有没有", "记错",
+               "特别", "别人", "告别", "别扭", "别致", "别处", "别名")
 
 
 def _is_explicit_denial(text: str) -> bool:
@@ -201,7 +204,7 @@ class HypothesisStore:
         max_chars: int = 300,
     ) -> tuple[Hypothesis | None, str | None]:
         statement = (statement or "").strip()[:max_chars]
-        scope = (scope or "").strip()[:120]
+        scope = (scope or "").strip()[:SCOPE_MAX]
         if not statement:
             return None, "假设内容为空"
         if not scope:
@@ -299,7 +302,13 @@ class HypothesisStore:
         return d
 
     def find_by_scope(self, scope: str) -> list[Hypothesis]:
-        """同 scope 的非删除假设（归纳器去重用）。"""
+        """同 scope 的非删除假设（归纳器去重用）。
+
+        含 rejected：调用方决定怎么处理（见 Inducer：rejected 只跳过，
+        不喂新证据——用户否决过的主题不再打扰）。
+        入参截断与写入侧一致（超长 activity 不 miss）。
+        """
+        scope = (scope or "").strip()[:SCOPE_MAX]
         with closing(self._connect()) as con:
             rows = con.execute(
                 "SELECT * FROM hypotheses WHERE scope=? AND status != 'deleted'"
@@ -325,6 +334,43 @@ class HypothesisStore:
                     "UPDATE hypotheses SET used_count = used_count + 1 WHERE id=?",
                     [(i,) for i in hypo_ids],
                 )
+
+    def export_all(self) -> dict[str, Any]:
+        """导出全部假设 + 证据 + 日志（信任导出/排错用，结构对标 context）。"""
+        with closing(self._connect()) as con:
+            hypos = con.execute(
+                "SELECT * FROM hypotheses ORDER BY created_at_epoch"
+            ).fetchall()
+            evs = con.execute(
+                "SELECT * FROM hypothesis_evidence ORDER BY created_at_epoch"
+            ).fetchall()
+            logs = con.execute(
+                "SELECT * FROM hypothesis_log ORDER BY epoch"
+            ).fetchall()
+        return {
+            "exported_at": _now().isoformat(),
+            "schema_version": 1,
+            "counts": {
+                "hypotheses": len(hypos),
+                "live": sum(1 for h in hypos if h["status"] in LIVE_STATUSES),
+                "evidence": len(evs),
+                "changes": len(logs),
+            },
+            "hypotheses": [self._row_to_hypo(h).to_public_dict()
+                           for h in hypos],
+            "evidence": [dict(e) for e in evs],
+            "history": [dict(l) for l in logs],
+        }
+
+    def clear_all(self) -> int:
+        """清空全部假设及证据（"清空全部"语义：失忆了就不该继续猜）。"""
+        with self._lock, closing(self._connect()) as con:
+            with con:
+                cur = con.execute("DELETE FROM hypotheses")
+                con.execute("DELETE FROM hypothesis_evidence")
+                con.execute("DELETE FROM hypothesis_log")
+        log.info("全部假设已清空（删除 %d 条）", cur.rowcount)
+        return cur.rowcount
 
     # ---------- 证据 ----------
     def _source_exists(
@@ -353,6 +399,35 @@ class HypothesisStore:
         except sqlite3.OperationalError:
             return False  # 表还不存在（如 fixture 库里没建 events 表）
         return bool(hit)
+
+    @staticmethod
+    def _row_day(con: sqlite3.Connection, source_type: str,
+                 source_id: str) -> str:
+        """证据来源行的"发生日"（独立性按来源日算，不按写入日）。
+
+        同一天产生的多条 Context 只算 1 个源；不同天各算各的。
+        correction 按纠正行为当天（行为本身就是独立用户动作）。
+        """
+        try:
+            if source_type == "context":
+                row = con.execute(
+                    "SELECT created_at_iso FROM context_entries WHERE id=?",
+                    (source_id,),
+                ).fetchone()
+                if row and row["created_at_iso"]:
+                    return str(row["created_at_iso"])[:10]
+            elif source_type == "event":
+                row = con.execute(
+                    "SELECT created_at_epoch FROM events WHERE id=?",
+                    (source_id,),
+                ).fetchone()
+                if row and row["created_at_epoch"]:
+                    return datetime.fromtimestamp(
+                        row["created_at_epoch"]).astimezone().strftime(
+                        "%Y-%m-%d")
+        except sqlite3.OperationalError:
+            pass
+        return _now().strftime("%Y-%m-%d")
 
     @staticmethod
     def _default_origin(
@@ -392,9 +467,6 @@ class HypothesisStore:
             return False, f"不允许的证据来源 {source_type}（假设不能证明自己）"
         if not source_id:
             return False, "证据来源 id 为空"
-        day = _now().strftime("%Y-%m-%d")
-        origin = origin or self._default_origin(source_type, source_id, day)
-        now = _now()
         with self._lock, closing(self._connect()) as con:
             hypo_row = con.execute(
                 "SELECT confidence, status FROM hypotheses WHERE id=?",
@@ -406,6 +478,13 @@ class HypothesisStore:
                 return False, "假设已删除，先恢复再绑定证据"
             if not self._source_exists(con, source_type, source_id):
                 return False, f"证据来源不存在：{source_type}:{source_id[:8]}"
+            # 默认 origin 取来源行的发生日（不是写入日），见 _row_day
+            day = _now().strftime("%Y-%m-%d")
+            origin = origin or self._default_origin(
+                source_type, source_id,
+                self._row_day(con, source_type, source_id)
+                if source_type != "correction" else day)
+            now = _now()
             dup = con.execute(
                 "SELECT id FROM hypothesis_evidence WHERE hypothesis_id=?"
                 " AND polarity=? AND source_type=? AND source_id=?",
@@ -491,7 +570,10 @@ class HypothesisStore:
     def reject(
         self, hypo_id: str, reason: str = "", channel: str = "trust_ui"
     ) -> bool:
-        """用户否决：建反证（追溯到本次否决行为）+ 置 0.25 + 状态 rejected。"""
+        """用户否决：建反证（追溯到本次否决行为）+ 置 0.25 + 状态 rejected。
+
+        幂等：已是 rejected 则直接返回 True（防双击刷证据数）。
+        """
         reason = (reason or "").strip()[:200]
         now = _now()
         with self._lock, closing(self._connect()) as con:
@@ -501,6 +583,8 @@ class HypothesisStore:
             ).fetchone()
             if not row or row["status"] == "deleted":
                 return False
+            if row["status"] == "rejected":
+                return True
             conf_before = float(row["confidence"])
             with con:
                 log_id = uuid.uuid4().hex

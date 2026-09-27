@@ -31,6 +31,7 @@ MIN_KEYWORD_LEN = 2          # 归纳关键词最小长度
 class InduceResult:
     created: list[str] = field(default_factory=list)  # 新建的假设 id
     linked: list[str] = field(default_factory=list)   # 去重命中、只补证据的假设 id
+    skipped: list[str] = field(default_factory=list)  # 主题曾被否决、跳过不再打扰
     checked_events: int = 0
     checked_interactions: int = 0
 
@@ -173,14 +174,21 @@ class Inducer:
         source_type: str,
     ) -> None:
         existing = self.hyp.find_by_scope(scope)
-        if existing:
-            hypo = existing[0]
+        live = [h for h in existing
+                if h.status in ("tentative", "confirmed")]
+        if live:
+            hypo = live[0]
             for source_id, excerpt in members:
                 self.hyp.add_evidence(
                     hypo.id, "support", source_type, source_id,
                     excerpt=excerpt)
             result.linked.append(hypo.id)
             log.info("归纳去重 [%s]：补 %d 条证据", scope, len(members))
+            return
+        if existing:
+            # 同 scope 已被用户否决：尊重否决，不新建、不喂料、不打扰
+            log.info("归纳跳过 [%s]：该主题曾被用户否决", scope)
+            result.skipped.append(existing[0].id)
             return
         hypo, skip = self.hyp.create(statement, scope,
                                      detail={"rule": scope.split(":")[0]})

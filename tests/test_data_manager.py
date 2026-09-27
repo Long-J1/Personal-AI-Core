@@ -237,3 +237,28 @@ def test_export_excludes_backups_dir(api):
     c.post("/api/data/backup")
     zf = zipfile.ZipFile(io.BytesIO(c.get("/api/data/export").content))
     assert not any(n.startswith("backups/") for n in zf.namelist())
+
+
+def test_manifest_counts_include_hypotheses(api):
+    """备份 manifest 看得到假设数：假设丢了能发现."""
+    from memory.hypothesis_store import HypothesisStore
+
+    c, store, ctx, data_dir = api
+    _seed(store, ctx)
+    hyp = HypothesisStore(data_dir / "personal_ai.db")
+    h, _ = hyp.create("用户可能接受提前提醒", "interaction:提醒")
+    assert h is not None
+
+    r = c.get("/api/data/export")
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    manifest = json.loads(zf.read("manifest.json"))
+    assert manifest["counts"].get("hypotheses") == 1
+
+    snap = data_dir / "_check2.db"
+    snap.write_bytes(zf.read("personal_ai.db"))
+    con = sqlite3.connect(snap)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0] == 1
+    finally:
+        con.close()
+        snap.unlink()

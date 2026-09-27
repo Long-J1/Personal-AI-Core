@@ -298,3 +298,40 @@ def test_hypotheses_ui_block_present(client):
     assert "hypoList" in html and "loadHypos" in html
     # ④ 信任界面不受影响
     assert "它对你的理解" in html
+
+
+# ---------- bugfix 回归（2026-09-27 扫 bug） ----------
+
+def test_manual_edit_links_hypothesis(client):
+    """④手动编辑同样联动假设（不止对话沉淀那条路）."""
+    c, hyp, ctx = _hypo_stores(client)
+    entry, _ = ctx.add_entry("interaction", "考试前一天提醒我", source="chat")
+    h, _ = hyp.create("用户可能接受提前提醒", "interaction:提醒")
+    assert hyp.add_evidence(h.id, "support", "context", entry.id)[0]
+    before = hyp.get(h.id).confidence
+    r = c.put(f"/api/context/{entry.id}", json={"content": "考试前两天提醒我"})
+    assert r.json()["ok"] is True
+    h = hyp.get(h.id)
+    assert h.confidence == before - 0.25  # 软反证（无否决词）
+    assert h.status == "tentative"
+
+
+def test_clear_memories_clears_hypotheses(client):
+    """清空全部 = 失忆：假设一起清，不留'失忆了还在猜'."""
+    c, hyp, ctx = _hypo_stores(client)
+    entry, _ = ctx.add_entry("interaction", "考试前一天提醒我", source="chat")
+    h, _ = hyp.create("用户可能接受提前提醒", "interaction:提醒")
+    hyp.add_evidence(h.id, "support", "context", entry.id)
+    r = c.delete("/api/memories")
+    assert r.json()["ok"] is True
+    assert c.get("/api/hypotheses").json()["total"] == 0
+    assert hyp.count_live() == 0
+
+
+def test_context_export_includes_hypotheses(client):
+    c, hyp, ctx = _hypo_stores(client)
+    h, _ = hyp.create("用户可能接受提前提醒", "interaction:提醒")
+    body = c.get("/api/context/export").json()
+    assert "hypotheses" in body
+    assert body["hypotheses"]["counts"]["hypotheses"] == 1
+    assert body["hypotheses"]["hypotheses"][0]["id"] == h.id

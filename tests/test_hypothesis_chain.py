@@ -99,3 +99,57 @@ def test_h4_soft_correction_keeps_tentative(chain):
     h = hyp.get(h.id)
     assert h.status == "tentative"
     assert h.confidence == pytest.approx(before - 0.25)
+
+
+# ---------- bugfix 回归（2026-09-27 扫 bug） ----------
+
+def test_empty_answer_is_model_error(store, context_store, chat_store):
+    """空回答不是回答：按模型故障抛 ModelError（webapp 转 503）."""
+    from models.base import ModelError
+    model = MockChatModel(text_queue=["   "])
+    conv = ConversationService(store, context_store, model,
+                               chat_store=chat_store)
+    sid = None
+    try:
+        conv.chat("你好")
+        assert False, "空回答应该抛 ModelError"
+    except ModelError:
+        pass
+    # 空回答不污染会话历史：唯一会话里没有任何消息
+    import sqlite3
+    con = sqlite3.connect(str(store.db_path))
+    n = con.execute("SELECT COUNT(*) FROM chat_messages").fetchone()[0]
+    con.close()
+    assert n == 0
+
+
+def test_deposit_exception_does_not_swallow_answer(
+        store, context_store, chat_store, monkeypatch):
+    """沉淀抛非 ModelError（如 sqlite 锁）也不许吞掉已生成的回答."""
+    model = MockChatModel(text_queue=["这是回答"])
+    conv = ConversationService(store, context_store, model,
+                               chat_store=chat_store)
+
+    def boom(*a, **k):
+        raise RuntimeError("模拟 sqlite 锁超时")
+
+    monkeypatch.setattr(conv.depositor, "deposit", boom)
+    r = conv.chat("你好")
+    assert r.answer == "这是回答"
+    assert r.deposit is not None and "跳过" in (r.deposit.get("error") or "")
+
+
+def test_apply_creates_records_truncated_content(store, context_store):
+    """deposit 返回落库后的截断内容，前后端一致."""
+    from core.config import Settings
+    from core.deposit import Depositor
+    settings = Settings(deposit_max_chars=10, deposit_max_new=3)
+    dep = Depositor(context_store, store, MockChatModel(), settings=settings)
+    from core.deposit import DepositResult
+    res3 = DepositResult()
+    dep._apply_creates(
+        {"new": [{"kind": "fact", "content": "这是一段超过十个字的长内容"}]},
+        res3)
+    assert res3.created and len(res3.created[0]["content"]) <= 10
+    row = context_store.get_entry(res3.created[0]["id"])
+    assert row.content == res3.created[0]["content"]

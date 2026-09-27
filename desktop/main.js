@@ -20,6 +20,15 @@ function coreUrl() {
   return core?.baseUrl || `http://127.0.0.1:${PORT}`;
 }
 
+/** 同源判断（白名单用）：防 startsWith 前缀钓鱼。 */
+function sameCoreOrigin(url) {
+  try {
+    return new URL(url).origin === new URL(coreUrl()).origin;
+  } catch {
+    return false;
+  }
+}
+
 let mainWindow = null;
 let core = null;
 let ollamaChild = null;
@@ -61,8 +70,9 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, 'loading.html'));
 
   // 下载 = 导出数据包（Core 的 /api/data/export 等）；外部链接交给系统浏览器
+  // 白名单按 origin 比对（startsWith 会放过 127.0.0.1:8000.evil.com 这类前缀钓鱼）
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith(coreUrl())) {
+    if (sameCoreOrigin(url)) {
       mainWindow.webContents.downloadURL(url);
     } else if (url.startsWith('http://') || url.startsWith('https://')) {
       shell.openExternal(url);
@@ -72,16 +82,26 @@ function createWindow() {
 
   // 页面内导航只允许 Core 自己（防止被外链带跑）
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith(coreUrl())) {
+    if (!sameCoreOrigin(url)) {
       event.preventDefault();
       if (url.startsWith('http://') || url.startsWith('https://')) shell.openExternal(url);
     }
+  });
+
+  // loadURL 失败很多时候不 reject：没这个监听就是白屏缺口
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
+    if (quitting) return;
+    log('页面加载失败：', errorCode, errorDescription, validatedURL);
+    showError(new ShellError('load-failed',
+      `界面加载失败（${errorDescription || ('错误码 ' + errorCode)}），Core 可能已退出，可点重试。`,
+      { port: core?.port ?? PORT }));
   });
 
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
 let lastState = null;
+let lastErrorShown = { code: '', at: 0 };
 
 function sendState(state) {
   lastState = state;
@@ -97,8 +117,17 @@ async function showCore() {
 }
 
 function showError(err) {
+  const code = err.code || 'unknown';
+  const now = Date.now();
+  // 启动即崩时 error 事件 + exit 事件会各调一次：2 秒内同码去重，
+  // 免得两个错误页排队、诊断信息串台
+  if (code === lastErrorShown.code && now - lastErrorShown.at < 2000) {
+    log('重复错误页已抑制：', code);
+    return;
+  }
+  lastErrorShown = { code, at: now };
   const info = {
-    code: err.code || 'unknown',
+    code,
     message: err.message || String(err),
     output: err.output || '',
     logDir: logDir(),
@@ -117,6 +146,7 @@ function showError(err) {
 async function boot() {
   if (booting) return;
   booting = true;
+  lastErrorShown = { code: '', at: 0 };  // 新一轮启动，错误页去重计数清零
   try {
     showLoading('正在检查 Personal AI Core…');
 

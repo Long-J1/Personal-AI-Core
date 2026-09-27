@@ -127,6 +127,14 @@ def create_app(
         hypothesis_store=hypothesis_store,
     )
 
+    def _safe_hyp_count() -> int | None:
+        """假设计数失败不许掀翻健康探针（status 是壳子的体温计）。"""
+        try:
+            return hypothesis_store.count_live()
+        except Exception as exc:
+            log.warning("假设计数失败：%s", exc)
+            return None
+
     app = FastAPI(title="Personal AI Core", version=settings.version)
 
     # ---------- 页面 ----------
@@ -166,7 +174,7 @@ def create_app(
             "provider": _describe(model)["provider"],
             "events": store.count_events(),
             "context_entries": context_store.count_active(),
-            "hypotheses": hypothesis_store.count_live(),
+            "hypotheses": _safe_hyp_count(),
             "sessions": chat_store.count_sessions(),
             "paused": store.paused,
             "model_service_ok": service_ok,
@@ -362,6 +370,13 @@ def create_app(
         ok = context_store.correct_entry(
             entry_id, req.content, source="manual", reason="用户手动编辑"
         )
+        if ok:
+            # V0.3：手动纠正同样联动假设（只走对话沉淀会漏掉这条路）
+            try:
+                hypothesis_store.record_correction_hit(
+                    entry_id, req.content, reason="用户手动编辑")
+            except Exception as exc:
+                log.warning("手动纠正联动假设失败（跳过）：%s", exc)
         entry = context_store.get_entry(entry_id)
         return {
             "ok": ok,
@@ -387,6 +402,11 @@ def create_app(
     @app.get("/api/context/export")
     def export_context() -> JSONResponse:
         data = context_store.export_all()
+        # V0.3：理解导出顺带假设（同属"它对你的理解"，分开两节）
+        try:
+            data["hypotheses"] = hypothesis_store.export_all()
+        except Exception as exc:
+            log.warning("假设导出失败（理解部分不受影响）：%s", exc)
         return JSONResponse(
             content=data,
             headers={
@@ -460,7 +480,14 @@ def create_app(
     @app.delete("/api/memories")
     def clear_memories() -> dict:
         deleted = store.delete_all_events()
-        return {"ok": True, "deleted": deleted}
+        # "清空全部" = 失忆：假设引用的事件都没了，留着假设就是"失忆了还在猜"
+        try:
+            hypo_deleted = hypothesis_store.clear_all()
+        except Exception as exc:
+            log.warning("清空假设失败：%s", exc)
+            hypo_deleted = 0
+        return {"ok": True, "deleted": deleted,
+                "hypotheses_deleted": hypo_deleted}
 
     @app.get("/api/memories/export")
     def export_memories() -> JSONResponse:

@@ -508,7 +508,7 @@ async function sendMsg() {
     }
     addBubble('ai', r.answer, meta);
     hint.hidden = true;
-    loadContext(); loadStatus();
+    loadContext(); loadHypos(); loadStatus();
   } catch (e) {
     hint.textContent = '❌ ' + e.message;
     hint.className = 'hint warn';
@@ -606,21 +606,24 @@ async function loadHypos() {
       }));
     $('hypoList').querySelectorAll('[data-hypo-ok]').forEach(b =>
       b.addEventListener('click', async () => {
-        await api('/api/hypotheses/' + b.dataset.hypoOk + '/confirm', { method: 'POST' });
+        const r = await api('/api/hypotheses/' + b.dataset.hypoOk + '/confirm', { method: 'POST' });
+        if (r && r.ok === false) { alert('确认失败：这条假设可能已被删除'); return; }
         loadHypos();
       }));
     $('hypoList').querySelectorAll('[data-hypo-no]').forEach(b =>
       b.addEventListener('click', async () => {
         const reason = prompt('它哪里猜错了？（会作为反证记下来）', '');
         if (reason === null) return;
-        await api('/api/hypotheses/' + b.dataset.hypoNo + '/reject',
+        const r = await api('/api/hypotheses/' + b.dataset.hypoNo + '/reject',
           { method: 'POST', body: JSON.stringify({ reason: reason.trim() }) });
+        if (r && r.ok === false) { alert('否决失败：这条假设可能已被删除'); return; }
         loadHypos(); loadStatus();
       }));
     $('hypoList').querySelectorAll('[data-hypo-del]').forEach(b =>
       b.addEventListener('click', async () => {
         if (!confirm('删除这条假设？删除后它不会再用这条假设辅助判断。')) return;
-        await api('/api/hypotheses/' + b.dataset.hypoDel, { method: 'DELETE' });
+        const r = await api('/api/hypotheses/' + b.dataset.hypoDel, { method: 'DELETE' });
+        if (r && r.ok === false) { alert('删除失败：这条假设可能已被删除'); return; }
         loadHypos(); loadStatus();
       }));
   } catch (e) { /* 静默 */ }

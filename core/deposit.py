@@ -212,8 +212,9 @@ class Depositor:
                 log.debug("新增跳过：%s", skip)
                 continue
             budget -= 1
+            # 记录落库后的实际内容（add_entry 内部会截断），前后端一致
             result.created.append(
-                {"id": entry.id, "kind": kind, "content": content}
+                {"id": entry.id, "kind": kind, "content": entry.content}
             )
 
     def _apply_event(self, data: dict, result: DepositResult) -> None:

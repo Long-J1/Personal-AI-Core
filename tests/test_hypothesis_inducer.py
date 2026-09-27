@@ -124,6 +124,24 @@ def test_r2_explicit_origins_count_separately(stores):
     assert hyp.get_detail(h.id)["independent_sources"] == 2
 
 
+def test_rejected_scope_not_recreated(stores):
+    """否决过的主题再现：不新建、不喂料、不打扰（尊重否决）。"""
+    mem, ctx, hyp = stores
+    for i in range(3):
+        mem.add_event(_event("写作业", f"作业{i}"))
+    ind = Inducer(mem, ctx, hyp)
+    r1 = ind.induce_all()
+    assert len(r1.created) == 1
+    hyp.reject(r1.created[0], reason="不需要")
+    mem.add_event(_event("写作业", "又有作业"))
+    r2 = ind.induce_all()
+    assert r2.created == [] and r2.linked == []
+    assert r2.skipped == r1.created
+    assert hyp.count_live() == 0
+    h = hyp.get(r1.created[0])
+    assert (h.status, h.support_count) == ("rejected", 3)
+
+
 def test_paused_skips_induction(stores):
     mem, ctx, hyp = stores
     for i in range(3):

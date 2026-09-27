@@ -38,13 +38,20 @@ function readLastPort(appDataDir) {
   return null;
 }
 
-/** 写入本次选定的端口。 */
-function writeLastPort(appDataDir, port) {
+/** 写入本次选定的端口（原子写：tmp + rename，防半截 JSON）。 */
+function writeLastPort(appDataDir, port, log) {
   if (!appDataDir) return;
+  const say = log || (() => {});
   const p = getPortMemoryPath(appDataDir);
   try {
-    fs.writeFileSync(p, JSON.stringify({ port, updated: Date.now() }), 'utf8');
-  } catch {}
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    const tmp = p + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ port, updated: Date.now() }), 'utf8');
+    fs.renameSync(tmp, p);
+  } catch (err) {
+    // 写不进也要大声说（静默回 8000 会让人误以为"没记住"）
+    say(`端口记忆写入失败：${err.message}`);
+  }
 }
 
 /** 扫描 8000-8099 找第一个能 bind 的端口。 */
@@ -135,15 +142,21 @@ class CoreManager extends EventEmitter {
    */
   constructor(deps = {}) {
     super();
-    // 优先级：显式传入 > 记忆文件 > 默认 8000
-    const explicit = deps.port;
+    this.log = deps.log || (() => {});
+    // 优先级：显式传入 > 记忆文件 > 默认 8000。
+    // 显式端口做范围校验（PAI_PORT=abc 之类直接忽略并记日志，不静默跳）。
+    let explicit = deps.port;
+    if (explicit !== undefined && explicit !== null &&
+        !(Number.isInteger(explicit) && explicit >= 1 && explicit <= 65535)) {
+      this.log(`忽略非法端口配置 ${explicit}，改用记忆/默认端口`);
+      explicit = null;
+    }
     const remembered = deps.appDataDir ? readLastPort(deps.appDataDir) : null;
     this.port = explicit || remembered || DEFAULT_PORT;
     this.baseUrl = `http://127.0.0.1:${this.port}`;
     this.fetchFn = deps.fetchFn || globalThis.fetch;
     this.spawnFn = deps.spawnFn || spawn;
     this.connectFn = deps.connectFn || null;
-    this.log = deps.log || (() => {});
     this.isPackaged = Boolean(deps.isPackaged);
     this.resourcesPath = deps.resourcesPath || '';
     this.projectRoot = deps.projectRoot || '';
@@ -154,6 +167,8 @@ class CoreManager extends EventEmitter {
 
     this.child = null;
     this._stopping = false;
+    this._starting = false;      // 启动轮询中：exit 由循环接管，不发 crashed
+    this._ensurePromise = null;  // 并发 ensure 合流，不许拉起双 Core
     this._output = [];
     this._outputLimit = 40;
   }
@@ -172,13 +187,19 @@ class CoreManager extends EventEmitter {
     }
   }
 
-  /** 尝试在当前端口启动；若端口被占则扫描 8000-8099 找空闲端口重试（最多全范围）。 */
+  /** 在指定端口启动并轮询健康（单次尝试；选端口是调用方的事）。
+   *
+   * 注意：探活地址必须用传入的 port 组装，绝不能用 this.baseUrl
+   * （两者不一致时会在别人的端口上报喜，或杀掉健康的自己人）。
+   */
   async _trySpawnOnPort(port) {
     const self = this;
     // 重试前清场：上次失败的 childError / kill 留下的 _stopping 会粘住新一轮
     // （踩过的坑：点"重试"秒挂，或 Core 崩了被 _stopping 吞掉不报）
     self._childError = null;
     self._stopping = false;
+    self._starting = true;
+    const baseUrl = `http://127.0.0.1:${port}`;
     const cmd = buildCoreCommand({
       isPackaged: this.isPackaged,
       resourcesPath: this.resourcesPath,
@@ -215,9 +236,15 @@ class CoreManager extends EventEmitter {
       self.log(`Core 进程错误：${err.message}`);
     });
     child.on('exit', (code, signal) => {
-      if (self._stopping) return;
-      self.log(`Core 意外退出 code=${code} signal=${signal}`);
       self.child = null;
+      // 启动轮询中：由循环抛 core-failed/spawn-failed，这里不重复报
+      if (self._stopping || self._starting) return;
+      // 正常退出（code=0）不是崩溃：不弹错误页
+      if (code === 0 && !signal) {
+        self.log('Core 正常退出（code=0），不视为崩溃');
+        return;
+      }
+      self.log(`Core 意外退出 code=${code} signal=${signal}`);
       self.emit('crashed', {
         code,
         signal,
@@ -228,36 +255,57 @@ class CoreManager extends EventEmitter {
     self.log(`正在启动 Core：${cmd.cmd} ${cmd.args.join(' ')} (port=${port})`);
 
     const deadline = Date.now() + self.healthTimeoutMs;
-    while (Date.now() < deadline) {
-      if (self._childError) {
-        throw new ShellError('spawn-failed', `无法启动 Core（${cmd.cmd}）：${self._childError.message}`, {
-          cmd: cmd.cmd,
-          output: self.tailOutput(),
-        });
+    try {
+      while (Date.now() < deadline) {
+        if (self._childError) {
+          throw new ShellError('spawn-failed', `无法启动 Core（${cmd.cmd}）：${self._childError.message}`, {
+            cmd: cmd.cmd,
+            output: self.tailOutput(),
+          });
+        }
+        const h = await probeHealth(baseUrl, self.fetchFn);
+        if (h.ok) {
+          self.log('Core 健康检查通过');
+          return true;
+        }
+        if (self.child === null) {
+          throw new ShellError(
+            'core-failed',
+            'Core 启动后立即退出，可能是运行环境损坏或数据目录不可写。',
+            { output: self.tailOutput() },
+          );
+        }
+        await sleep(self.pollIntervalMs);
       }
-      const h = await probeHealth(self.baseUrl, self.fetchFn);
-      if (h.ok) {
-        self.log('Core 健康检查通过');
-        return true;
-      }
-      if (self.child === null) {
-        throw new ShellError(
-          'core-failed',
-          'Core 启动后立即退出，可能是运行环境损坏或数据目录不可写。',
-          { output: self.tailOutput() },
-        );
-      }
-      await sleep(self.pollIntervalMs);
+      return false; // 超时
+    } finally {
+      self._starting = false;
     }
-    return false; // 超时
   }
 
-  /** 主入口：能连就复用，不能连就拉起；失败抛 ShellError（永不白屏的依据）。 */
+  /** 主入口：能连就复用，不能连就拉起；失败抛 ShellError（永不白屏的依据）。
+   *
+   * 并发调用合流：同一次启动只会有一次 spawn，不许拉起双 Core。
+   */
   async ensure() {
+    if (this._ensurePromise) return this._ensurePromise;
+    this._ensurePromise = this._ensureInner();
+    try {
+      return await this._ensurePromise;
+    } finally {
+      this._ensurePromise = null;
+    }
+  }
+
+  async _ensureInner() {
     const self = this;
     // 1) 先探当前端口是否已有健康 Core
     const health = await probeHealth(self.baseUrl, self.fetchFn);
     if (health.ok) {
+      self._stopping = false;
+      if (self.appDataDir) {
+        writeLastPort(self.appDataDir, self.port, self.log);
+      }
       self.log(`复用已运行的 Core（v${health.version ?? '?'}，port=${self.port}）`);
       return { mode: 'connected' };
     }
@@ -292,32 +340,50 @@ class CoreManager extends EventEmitter {
 
     // 4) 启动成功，持久化端口供下次复用
     if (self.appDataDir) {
-      writeLastPort(self.appDataDir, self.port);
+      writeLastPort(self.appDataDir, self.port, self.log);
     }
     return { mode: 'spawned' };
   }
 
-  /** 关闭自己拉起的 Core（Windows 下连子进程树一起收，绝不留孤儿）。 */
+  /** 关闭自己拉起的 Core（Windows 下连子进程树一起收，绝不留孤儿）。
+   *
+   * 杀失败时保留句柄并大声记日志（还能再杀/监听），
+   * 不许静默丢 PID 造孤儿。
+   */
   kill() {
     const child = this.child;
     if (!child) return false;
     this._stopping = true;
-    this.child = null;
+    let dead = false;
     try {
       if (process.platform === 'win32') {
         const { execFileSync } = require('node:child_process');
         try {
           execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
+          dead = true;
         } catch {
-          child.kill();
+          try {
+            dead = child.kill();
+          } catch {
+            dead = false;
+          }
         }
       } else {
-        child.kill('SIGTERM');
+        try {
+          child.kill('SIGTERM');
+          dead = true;
+        } catch {
+          dead = false;
+        }
       }
     } catch (err) {
       this.log(`关闭 Core 失败：${err.message}`);
+    }
+    if (!dead) {
+      this.log(`关闭 Core 未确认死亡（PID=${child.pid}），保留句柄以便重试`);
       return false;
     }
+    this.child = null;
     this.log('已关闭 Core');
     return true;
   }
@@ -330,5 +396,10 @@ module.exports = {
   isPortOpen,
   buildCoreCommand,
   buildCoreEnv,
+  findFreePort,
+  readLastPort,
+  writeLastPort,
   DEFAULT_PORT,
+  PORT_RANGE_START,
+  PORT_RANGE_END,
 };

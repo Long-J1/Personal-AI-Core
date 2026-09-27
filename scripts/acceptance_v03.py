@@ -51,6 +51,16 @@ def main() -> int:
         print(f"[FAIL] {msg}")
         sys.exit(1)
 
+    def post(c, url, payload=None):
+        """POST 必须 200 且 ok 不为 False（坏行为不许悄悄溜过）."""
+        r = c.post(url, json=payload) if payload is not None else c.post(url)
+        if r.status_code != 200:
+            fail(f"POST {url} 返回 {r.status_code}：{r.text[:200]}")
+        body = r.json()
+        if isinstance(body, dict) and body.get("ok") is False:
+            fail(f"POST {url} 返回 ok:false：{r.text[:200]}")
+        return body
+
     with tempfile.TemporaryDirectory(prefix="pai_v03_acc_") as tmp:
         store = MemoryStore(Path(tmp) / "acc.db")
         model = MockChatModel(
@@ -74,8 +84,8 @@ def main() -> int:
         ok(f"服务就绪：v{s['version']} 假设={s['hypotheses']}")
 
         # 2. 两轮对话沉淀出 2 条 interaction → R2 归纳出假设
-        c.post("/api/conversation", json={"message": "以后考试前一天提醒我"})
-        c.post("/api/conversation", json={"message": "重要事情也要提前提醒"})
+        post(c, "/api/conversation", {"message": "以后考试前一天提醒我"})
+        post(c, "/api/conversation", {"message": "重要事情也要提前提醒"})
         body = c.get("/api/hypotheses").json()
         if body["total"] != 1:
             fail(f"R2 未归纳出假设：{body}")
@@ -89,11 +99,10 @@ def main() -> int:
             import base64
             from tests.helpers import make_image
             img = base64.b64encode(make_image("ACC")).decode("ascii")
-            r = c.post("/api/observe",
-                       json={"image_b64": img, "source": "upload"})
-            if not r.json().get("stored"):
-                fail(f"观察未入库：{r.text[:200]}")
-        c.post("/api/conversation", json={"message": "今天学得怎么样"})
+            r = post(c, "/api/observe", {"image_b64": img, "source": "upload"})
+            if not r.get("stored"):
+                fail(f"观察未入库：{r}")
+        post(c, "/api/conversation", {"message": "今天学得怎么样"})
         items = c.get("/api/hypotheses").json()["items"]
         r1 = [i for i in items if i["scope"] == "activity:写作业"]
         if not r1:
@@ -112,10 +121,9 @@ def main() -> int:
         ok("H1/H3 证据可追溯：3 条事件证据 + create 审计")
 
         # 5. 否决：0.25 + rejected + 不再列出
-        r = c.post(f"/api/hypotheses/{hid}/reject",
-                   json={"reason": "这段时间不需要"})
-        if r.json() != {"ok": True}:
-            fail(f"否决失败：{r.text[:200]}")
+        rb = post(c, f"/api/hypotheses/{hid}/reject", {"reason": "这段时间不需要"})
+        if rb != {"ok": True}:
+            fail(f"否决失败：{rb}")
         d2 = c.get(f"/api/hypotheses/{hid}").json()["hypothesis"]
         if d2["status"] != "rejected" or d2["confidence"] != 0.25:
             fail(f"否决后状态不对：{d2['status']}/{d2['confidence']}")
@@ -127,7 +135,7 @@ def main() -> int:
         other = [i for i in c.get("/api/hypotheses").json()["items"]
                  if i["id"] != hid][0]
         before = other["confidence"]
-        c.post(f"/api/hypotheses/{other['id']}/confirm")
+        post(c, f"/api/hypotheses/{other['id']}/confirm")
         after = c.get(f"/api/hypotheses/{other['id']}").json()["hypothesis"]
         if after["status"] != "confirmed" or after["confidence"] != before:
             fail(f"确认语义不对：{after}")
@@ -137,7 +145,7 @@ def main() -> int:
         c.delete(f"/api/hypotheses/{other['id']}")
         if c.get("/api/hypotheses").json()["total"] != 0:
             fail("删除后仍可见")
-        c.post(f"/api/hypotheses/{other['id']}/restore")
+        post(c, f"/api/hypotheses/{other['id']}/restore")
         if c.get("/api/hypotheses").json()["total"] != 1:
             fail("恢复后不可见")
         ok("删除/恢复闭环")

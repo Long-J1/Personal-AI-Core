@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from memory.context_store import KIND_LABELS, ContextEntry, ContextStore
 from memory.hypothesis_store import STATUS_LABELS, HypothesisStore
 from memory.store import MemoryStore
-from models.base import BaseModelAdapter
+from models.base import BaseModelAdapter, ModelError
 
 from .config import Settings, settings as default_settings
 from .deposit import Depositor, DepositResult
@@ -115,16 +115,23 @@ class ConversationService:
 
         directives = derive_directives(entries)
 
-        # V0.3：待验证假设进 Prompt——单独段、降权标记，绝不当事实
-        hyps = self.hyp.list_for_prompt(
-            limit=self.settings.hypotheses_max_prompt)
+        # V0.3：待验证假设进 Prompt——单独段、降权标记，绝不当事实。
+        # 韧性：假设库故障不许掀翻对话（辅助判断没有这个权力）。
+        try:
+            hyps = self.hyp.list_for_prompt(
+                limit=self.settings.hypotheses_max_prompt)
+        except Exception as exc:
+            log.warning("假设读取失败（本轮跳过假设段）：%s", exc)
+            hyps = []
         if hyps:
             lines = []
             for h in hyps:
                 tag = ("用户已确认" if h.status == "confirmed"
                        else "待验证")
+                # 假设陈述里的换行/伪节头不许污染 system prompt 结构
+                stmt = " ".join(str(h.statement).split())
                 lines.append(
-                    f"- [{tag}·置信度{h.confidence:.2f}] {h.statement}")
+                    f"- [{tag}·置信度{h.confidence:.2f}] {stmt}")
             hypo_block = "\n".join(lines)
         else:
             hypo_block = "（暂无）"
@@ -195,6 +202,9 @@ class ConversationService:
         answer = self.model.chat(
             messages, timeout=self.settings.recall_timeout
         ).strip()
+        if not answer:
+            # 空回答不是回答：按模型故障处理（503），不拿空白糊弄用户
+            raise ModelError("模型返回了空回答")
 
         # 判断可断言：指令存在 → approach = 指令；否则默认
         approach = directives or ["default"]
@@ -208,8 +218,18 @@ class ConversationService:
             for e in entries:  # 内存对象同步（回复里的 used_count 是"用过之后"）
                 e.used_count += 1
             if hyps:
-                self.hyp.mark_used([h.id for h in hyps])
-            result: DepositResult = self.depositor.deposit(message, answer, entries)
+                try:
+                    self.hyp.mark_used([h.id for h in hyps])
+                except Exception as exc:
+                    log.warning("假设使用计数失败（跳过）：%s", exc)
+            # 沉淀自称"绝不抛异常"，这里再加一道保险：沉淀的任何失败
+            # （如 sqlite 锁）都不许吞掉用户已经拿到的回答
+            try:
+                result: DepositResult = self.depositor.deposit(
+                    message, answer, entries)
+            except Exception as exc:
+                log.error("沉淀异常（本轮跳过沉淀）：%s", exc)
+                result = DepositResult(error=f"沉淀异常，已跳过：{exc}")
             deposit = result.to_dict()
             # V0.3：沉淀后跑规则归纳（后台路径；失败只记日志，不打断对话）
             try:

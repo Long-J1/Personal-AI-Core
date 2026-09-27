@@ -114,7 +114,7 @@ class DataManager:
         con = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=15)
         try:
             out = {}
-            for table in ("events", "context_entries"):
+            for table in ("events", "context_entries", "hypotheses"):
                 try:
                     out[table] = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                 except sqlite3.Error:
