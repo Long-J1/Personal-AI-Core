@@ -13,7 +13,12 @@ const { CoreManager, ShellError, DEFAULT_PORT } = require('./src/core-manager');
 const { ensureOllama, killOllama } = require('./src/ollama-manager');
 
 const PORT = Number(process.env.PAI_PORT || DEFAULT_PORT);
-const CORE_URL = `http://127.0.0.1:${PORT}`;
+
+// Core 的实际地址：可能被 core-manager 自动扫到别的端口（8000-8099），
+// 所以一切以 core.baseUrl 为准，PORT 只是 Core 还没建出来时的兜底。
+function coreUrl() {
+  return core?.baseUrl || `http://127.0.0.1:${PORT}`;
+}
 
 let mainWindow = null;
 let core = null;
@@ -57,7 +62,7 @@ function createWindow() {
 
   // 下载 = 导出数据包（Core 的 /api/data/export 等）；外部链接交给系统浏览器
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith(CORE_URL)) {
+    if (url.startsWith(coreUrl())) {
       mainWindow.webContents.downloadURL(url);
     } else if (url.startsWith('http://') || url.startsWith('https://')) {
       shell.openExternal(url);
@@ -67,7 +72,7 @@ function createWindow() {
 
   // 页面内导航只允许 Core 自己（防止被外链带跑）
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith(CORE_URL)) {
+    if (!url.startsWith(coreUrl())) {
       event.preventDefault();
       if (url.startsWith('http://') || url.startsWith('https://')) shell.openExternal(url);
     }
@@ -88,7 +93,7 @@ function showLoading(text) {
 }
 
 async function showCore() {
-  await mainWindow.loadURL(CORE_URL);
+  await mainWindow.loadURL(coreUrl());
 }
 
 function showError(err) {
@@ -97,7 +102,7 @@ function showError(err) {
     message: err.message || String(err),
     output: err.output || '',
     logDir: logDir(),
-    port: PORT,
+    port: core?.port ?? PORT,
   };
   log('显示错误页：', info.code, info.message);
   if (!mainWindow) return;
@@ -187,7 +192,9 @@ if (!gotLock) {
     try { app.setAppUserModelId('com.personalai.core'); } catch {}
 
     core = new CoreManager({
-      port: PORT,
+      // 只有用户显式设了 PAI_PORT 才钉死端口；否则交给 CoreManager
+      // （记忆文件 core-port.json → 8000-8099 自动扫描）
+      ...(process.env.PAI_PORT ? { port: PORT } : {}),
       isPackaged: app.isPackaged,
       resourcesPath: process.resourcesPath,
       projectRoot: path.join(__dirname, '..'),

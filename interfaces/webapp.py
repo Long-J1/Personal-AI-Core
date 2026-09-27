@@ -140,8 +140,15 @@ def create_app(
         ping = getattr(model, "ping", None)
         service_ok = None
         if callable(ping):
+            # 限死 0.8s：status 是桌面壳的健康探针，绝不能被模型网络拖过探测超时
+            # （踩过的坑：ping 默认 2s 走代理 > 壳子 2s 探测线 → Core 活着却永远"没起来"）
             try:
-                service_ok = bool(ping())
+                service_ok = bool(ping(timeout=0.8))
+            except TypeError:  # 某些实现的 ping() 不收 timeout
+                try:
+                    service_ok = bool(ping())
+                except Exception:
+                    service_ok = False
             except Exception:
                 service_ok = False
         return {

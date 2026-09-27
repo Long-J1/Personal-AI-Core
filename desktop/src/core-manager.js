@@ -12,8 +12,50 @@ const { spawn } = require('node:child_process');
 const { EventEmitter } = require('node:events');
 
 const DEFAULT_PORT = 8000;
-const DEFAULT_HEALTH_TIMEOUT_MS = 60_000;   // PyInstaller 冷启动也够用
+const DEFAULT_HEALTH_TIMEOUT_MS = 90_000;   // 增加到 90s，防冷启动/机器忙时被误判
 const DEFAULT_POLL_INTERVAL_MS = 400;
+const PORT_RANGE_START = 8000;
+const PORT_RANGE_END = 8099;
+
+const fs = require('node:fs');
+
+/** 端口记忆文件：放在数据目录，跟随重装/卸载不丢。 */
+function getPortMemoryPath(appDataDir) {
+  return path.join(appDataDir, 'core-port.json');
+}
+
+/** 读取上次用过的端口。 */
+function readLastPort(appDataDir) {
+  if (!appDataDir) return null;
+  const p = getPortMemoryPath(appDataDir);
+  try {
+    const txt = fs.readFileSync(p, 'utf8');
+    const obj = JSON.parse(txt);
+    if (typeof obj.port === 'number' && obj.port >= PORT_RANGE_START && obj.port <= PORT_RANGE_END) {
+      return obj.port;
+    }
+  } catch {}
+  return null;
+}
+
+/** 写入本次选定的端口。 */
+function writeLastPort(appDataDir, port) {
+  if (!appDataDir) return;
+  const p = getPortMemoryPath(appDataDir);
+  try {
+    fs.writeFileSync(p, JSON.stringify({ port, updated: Date.now() }), 'utf8');
+  } catch {}
+}
+
+/** 扫描 8000-8099 找第一个能 bind 的端口。 */
+async function findFreePort(connectFn) {
+  for (let p = PORT_RANGE_START; p <= PORT_RANGE_END; p++) {
+    if (!(await isPortOpen(p, connectFn, 200))) {
+      return p;
+    }
+  }
+  return null; // 全占了（极不可能）
+}
 
 class ShellError extends Error {
   constructor(code, message, extra = {}) {
@@ -25,7 +67,7 @@ class ShellError extends Error {
 }
 
 /** 探测 Core 健康（/api/status）。返回 {ok, detail}。 */
-async function probeHealth(baseUrl, fetchFn, timeoutMs = 2000) {
+async function probeHealth(baseUrl, fetchFn, timeoutMs = 5000) {
   try {
     const res = await fetchFn(`${baseUrl}/api/status`, {
       signal: AbortSignal.timeout(timeoutMs),
@@ -93,7 +135,10 @@ class CoreManager extends EventEmitter {
    */
   constructor(deps = {}) {
     super();
-    this.port = deps.port || DEFAULT_PORT;
+    // 优先级：显式传入 > 记忆文件 > 默认 8000
+    const explicit = deps.port;
+    const remembered = deps.appDataDir ? readLastPort(deps.appDataDir) : null;
+    this.port = explicit || remembered || DEFAULT_PORT;
     this.baseUrl = `http://127.0.0.1:${this.port}`;
     this.fetchFn = deps.fetchFn || globalThis.fetch;
     this.spawnFn = deps.spawnFn || spawn;
@@ -109,7 +154,7 @@ class CoreManager extends EventEmitter {
 
     this.child = null;
     this._stopping = false;
-    this._output = [];        // Core stdout/stderr 尾巴（错误页展示用）
+    this._output = [];
     this._outputLimit = 40;
   }
 
@@ -127,35 +172,25 @@ class CoreManager extends EventEmitter {
     }
   }
 
-  /** 主入口：能连就复用，不能连就拉起；失败抛 ShellError（永不白屏的依据）。 */
-  async ensure() {
-    const health = await probeHealth(this.baseUrl, this.fetchFn);
-    if (health.ok) {
-      this.log(`复用已运行的 Core（v${health.version ?? '?'}）`);
-      return { mode: 'connected' };
-    }
-
-    // 端口被占但健康检查不过 → 不是我们的 Core，别静默失败
-    if (await isPortOpen(this.port, this.connectFn)) {
-      throw new ShellError(
-        'port-conflict',
-        `端口 ${this.port} 已被其他程序占用，Personal AI Core 无法启动。`,
-        { port: this.port },
-      );
-    }
-
+  /** 尝试在当前端口启动；若端口被占则扫描 8000-8099 找空闲端口重试（最多全范围）。 */
+  async _trySpawnOnPort(port) {
+    const self = this;
+    // 重试前清场：上次失败的 childError / kill 留下的 _stopping 会粘住新一轮
+    // （踩过的坑：点"重试"秒挂，或 Core 崩了被 _stopping 吞掉不报）
+    self._childError = null;
+    self._stopping = false;
     const cmd = buildCoreCommand({
       isPackaged: this.isPackaged,
       resourcesPath: this.resourcesPath,
       projectRoot: this.projectRoot,
       env: this.baseEnv,
-      port: this.port,
+      port,
     });
     const env = buildCoreEnv({
       baseEnv: this.baseEnv,
       isPackaged: this.isPackaged,
       appDataDir: this.appDataDir,
-      port: this.port,
+      port,
     });
 
     let child;
@@ -172,57 +207,94 @@ class CoreManager extends EventEmitter {
       });
     }
 
-    this.child = child;
-    child.stdout?.on('data', (d) => this._trackOutput(d));
-    child.stderr?.on('data', (d) => this._trackOutput(d));
+    self.child = child;
+    child.stdout?.on('data', (d) => self._trackOutput(d));
+    child.stderr?.on('data', (d) => self._trackOutput(d));
     child.on('error', (err) => {
-      this._childError = err;
-      this.log(`Core 进程错误：${err.message}`);
+      self._childError = err;
+      self.log(`Core 进程错误：${err.message}`);
     });
     child.on('exit', (code, signal) => {
-      if (this._stopping) return;
-      this.log(`Core 意外退出 code=${code} signal=${signal}`);
-      this.child = null;
-      this.emit('crashed', {
+      if (self._stopping) return;
+      self.log(`Core 意外退出 code=${code} signal=${signal}`);
+      self.child = null;
+      self.emit('crashed', {
         code,
         signal,
-        output: this.tailOutput(),
+        output: self.tailOutput(),
       });
     });
 
-    this.log(`正在启动 Core：${cmd.cmd} ${cmd.args.join(' ')}`);
+    self.log(`正在启动 Core：${cmd.cmd} ${cmd.args.join(' ')} (port=${port})`);
 
-    const deadline = Date.now() + this.healthTimeoutMs;
+    const deadline = Date.now() + self.healthTimeoutMs;
     while (Date.now() < deadline) {
-      if (this._childError) {
-        throw new ShellError('spawn-failed', `无法启动 Core（${cmd.cmd}）：${this._childError.message}`, {
+      if (self._childError) {
+        throw new ShellError('spawn-failed', `无法启动 Core（${cmd.cmd}）：${self._childError.message}`, {
           cmd: cmd.cmd,
-          output: this.tailOutput(),
+          output: self.tailOutput(),
         });
       }
-      const h = await probeHealth(this.baseUrl, this.fetchFn);
+      const h = await probeHealth(self.baseUrl, self.fetchFn);
       if (h.ok) {
-        this.log('Core 健康检查通过');
-        return { mode: 'spawned' };
+        self.log('Core 健康检查通过');
+        return true;
       }
-      if (this.child === null) {
-        // 已经退出了（exit 回调里置空）
+      if (self.child === null) {
         throw new ShellError(
           'core-failed',
           'Core 启动后立即退出，可能是运行环境损坏或数据目录不可写。',
-          { output: this.tailOutput() },
+          { output: self.tailOutput() },
         );
       }
-      await sleep(this.pollIntervalMs);
+      await sleep(self.pollIntervalMs);
+    }
+    return false; // 超时
+  }
+
+  /** 主入口：能连就复用，不能连就拉起；失败抛 ShellError（永不白屏的依据）。 */
+  async ensure() {
+    const self = this;
+    // 1) 先探当前端口是否已有健康 Core
+    const health = await probeHealth(self.baseUrl, self.fetchFn);
+    if (health.ok) {
+      self.log(`复用已运行的 Core（v${health.version ?? '?'}，port=${self.port}）`);
+      return { mode: 'connected' };
     }
 
-    // 超时：收尸，别留孤儿
-    this.kill();
-    throw new ShellError(
-      'spawn-timeout',
-      `Core 在 ${Math.round(this.healthTimeoutMs / 1000)} 秒内未通过健康检查。`,
-      { output: this.tailOutput() },
-    );
+    // 2) 当前端口被占但不是我们的 Core → 扫描找空闲端口
+    if (await isPortOpen(self.port, self.connectFn)) {
+      self.log(`端口 ${self.port} 被占用，自动寻找空闲端口...`);
+      const freePort = await findFreePort(self.connectFn);
+      if (!freePort) {
+        throw new ShellError(
+          'port-conflict',
+          `端口 ${PORT_RANGE_START}-${PORT_RANGE_END} 全被占用，Personal AI Core 无法启动。`,
+          { port: self.port },
+        );
+      }
+      self.port = freePort;
+      self.baseUrl = `http://127.0.0.1:${self.port}`;
+      self.log(`切换到空闲端口 ${self.port}`);
+    }
+
+    // 3) 在选定端口尝试启动（健康检查超时 90s）
+    const ok = await self._trySpawnOnPort(self.port);
+    if (!ok) {
+      // 超时：收尸，别留孤儿
+      self.kill();
+      throw new ShellError(
+        'spawn-timeout',
+        `Core 在 ${Math.round(self.healthTimeoutMs / 1000)} 秒内未通过健康检查。`,
+        { output: self.tailOutput() },
+      );
+    }
+
+    // 4) 启动成功，持久化端口供下次复用
+    if (self.appDataDir) {
+      writeLastPort(self.appDataDir, self.port);
+    }
+    return { mode: 'spawned' };
   }
 
   /** 关闭自己拉起的 Core（Windows 下连子进程树一起收，绝不留孤儿）。 */

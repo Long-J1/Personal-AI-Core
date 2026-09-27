@@ -19,6 +19,9 @@ function fakeChild() {
   c.kill = () => { c.killed = true; return true; };
   c.stdout = new EventEmitter();
   c.stderr = new EventEmitter();
+  // CoreManager 会调用 child.stdout.on('data', ...) 和 child.stderr.on('data', ...)
+  c.stdout.on = c.stdout.on.bind(c.stdout);
+  c.stderr.on = c.stderr.on.bind(c.stderr);
   return c;
 }
 
@@ -186,4 +189,54 @@ test('kill: 主动关闭不触发 crashed（正常退出≠崩溃）', async () 
   child.emit('exit', 0, null);
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(crashedFired, false, '主动关闭不应报崩溃');
+});
+
+test('重试不粘连：kill 后再 ensure，新 Core 崩溃必须照常报 crashed', async () => {
+  let n = 0;
+  const fetchFn = async () => {
+    n += 1;
+    if (n <= 1) throw new Error('down');
+    return { ok: true, json: async () => ({ version: '0.2.0' }) };
+  };
+  const { mgr, child } = makeManager({ fetchFn });
+  await mgr.ensure();
+  mgr.kill();                       // 上一轮收尸留下 _stopping=true
+  child.emit('exit', 0, null);
+
+  // 第二轮：复用同一个 manager（点"重试"就是这条路）
+  const child2 = fakeChild();
+  mgr.spawnFn = () => child2;
+  let n2 = 0;
+  mgr.fetchFn = async () => {
+    n2 += 1;
+    if (n2 <= 1) throw new Error('down');
+    return { ok: true, json: async () => ({ version: '0.2.0' }) };
+  };
+  await mgr.ensure();
+
+  const crashed = new Promise((resolve) => mgr.once('crashed', resolve));
+  child2.emit('exit', 1, null);      // _stopping 若没复位，这行会被静默吞掉
+  const info = await crashed;
+  assert.equal(info.code, 1, '重试后的崩溃必须能报出来');
+});
+
+test('重试不粘连：上一轮的 _childError 不许秒杀新一轮 spawn', async () => {
+  const { mgr } = makeManager({
+    fetchFn: async () => { throw new Error('down'); },
+    spawnFn: () => { throw new Error('boom'); },
+  });
+  await assert.rejects(() => mgr.ensure(), (e) => e.code === 'spawn-failed');
+  assert.ok(mgr._childError === null || mgr._childError !== undefined);
+
+  // 修好之后重试：环境恢复正常（新 spawnFn 成功），不许被上一轮错误粘住
+  const child = fakeChild();
+  let n = 0;
+  mgr.spawnFn = () => child;
+  mgr.fetchFn = async () => {
+    n += 1;
+    if (n <= 1) throw new Error('down');
+    return { ok: true, json: async () => ({ version: '0.2.0' }) };
+  };
+  const r = await mgr.ensure();
+  assert.equal(r.mode, 'spawned', '上一轮失败不应污染这一轮');
 });
