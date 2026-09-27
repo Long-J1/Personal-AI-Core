@@ -233,3 +233,58 @@ def test_conversation_model_error_503(client):
     r = c.post("/api/conversation", json={"message": "你好"})
     assert r.status_code == 503
     assert "模型暂不可用" in r.json()["error"]
+
+
+# ------------------------------------------------- V0.3 H5：假设 API
+def _hypo_stores(client):
+    from memory.context_store import ContextStore
+    from memory.hypothesis_store import HypothesisStore
+
+    c, store, _ = client
+    return c, HypothesisStore(store.db_path), ContextStore(store.db_path)
+
+
+def test_hypotheses_empty_and_status_count(client):
+    c, _, _ = _hypo_stores(client)
+    r = c.get("/api/hypotheses")
+    assert r.status_code == 200
+    assert r.json() == {"total": 0, "items": []}
+    assert c.get("/api/status").json()["hypotheses"] == 0
+
+
+def test_hypotheses_full_flow(client):
+    c, hyp, ctx = _hypo_stores(client)
+    entry, _ = ctx.add_entry("interaction", "考试前一天提醒我", source="chat")
+    h, _ = hyp.create("用户可能接受重要事件的提前提醒", "interaction:提醒")
+    assert hyp.add_evidence(h.id, "support", "context", entry.id,
+                            excerpt="x")[0]
+
+    body = c.get("/api/hypotheses").json()
+    assert body["total"] == 1
+    item = body["items"][0]
+    assert item["statement"] == "用户可能接受重要事件的提前提醒"
+    assert item["confidence"] == 0.58 and item["status"] == "tentative"
+    assert c.get("/api/status").json()["hypotheses"] == 1
+
+    d = c.get(f"/api/hypotheses/{h.id}").json()
+    assert d["ok"]
+    assert d["hypothesis"]["evidence"][0]["source_id"] == entry.id
+    assert d["hypothesis"]["independent_sources"] == 1
+
+    assert c.post(f"/api/hypotheses/{h.id}/confirm").json() == {"ok": True}
+    assert hyp.get(h.id).status == "confirmed"
+
+    r = c.post(f"/api/hypotheses/{h.id}/reject", json={"reason": "不需要"})
+    assert r.json() == {"ok": True}
+    h = hyp.get(h.id)
+    assert (h.status, h.confidence) == ("rejected", 0.25)
+    assert c.get("/api/hypotheses").json()["total"] == 0
+
+    h2, _ = hyp.create("另一条假设", "scope:z")
+    assert c.delete(f"/api/hypotheses/{h2.id}").json()["ok"] is True
+    assert c.post(f"/api/hypotheses/{h2.id}/restore").json()["ok"] is True
+    assert hyp.get(h2.id).status == "tentative"
+
+    assert c.get("/api/hypotheses/" + "0" * 32).status_code == 404
+    got = c.post("/api/hypotheses/" + "0" * 32 + "/confirm").json()
+    assert got == {"ok": False}

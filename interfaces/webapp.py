@@ -25,6 +25,7 @@ from core.data_manager import DataManager, DataError
 from core.pipeline import CorePipeline
 from memory.chat_store import ChatStore
 from memory.context_store import ContextStore
+from memory.hypothesis_store import HypothesisStore
 from memory.store import MemoryStore
 from models.base import BaseModelAdapter, ModelError
 from models.factory import ModelRegistry, build_model
@@ -57,6 +58,10 @@ class ConversationRequest(BaseModel):
 
 class ContextUpdateRequest(BaseModel):
     content: str = Field(min_length=1, max_length=500)
+
+
+class HypothesisRejectRequest(BaseModel):
+    reason: str = Field(default="", max_length=200)
 
 
 # ---------- 模型设置（D009） ----------
@@ -102,6 +107,7 @@ def create_app(
     model: BaseModelAdapter | None = None,
     context_store: ContextStore | None = None,
     chat_store: ChatStore | None = None,
+    hypothesis_store: HypothesisStore | None = None,
 ) -> FastAPI:
     ensure_dirs()
     store = store or MemoryStore(DB_PATH)
@@ -112,10 +118,13 @@ def create_app(
     data_mgr = DataManager(Path(DATA_DIR), Path(THUMB_DIR))
     context_store = context_store or ContextStore(store.db_path)
     chat_store = chat_store or ChatStore(store.db_path)
+    # V0.3：假设与记忆同库（零配置）；测试可注入独立实例
+    hypothesis_store = hypothesis_store or HypothesisStore(store.db_path)
     pipeline = CorePipeline(store, model)
     recaller = Recaller(store, model)
     conversation = ConversationService(
-        store, context_store, model, chat_store=chat_store
+        store, context_store, model, chat_store=chat_store,
+        hypothesis_store=hypothesis_store,
     )
 
     app = FastAPI(title="Personal AI Core", version=settings.version)
@@ -157,6 +166,7 @@ def create_app(
             "provider": _describe(model)["provider"],
             "events": store.count_events(),
             "context_entries": context_store.count_active(),
+            "hypotheses": hypothesis_store.count_live(),
             "sessions": chat_store.count_sessions(),
             "paused": store.paused,
             "model_service_ok": service_ok,
@@ -383,6 +393,45 @@ def create_app(
                 "Content-Disposition": "attachment; filename=personal_ai_context.json"
             },
         )
+
+    # ---------- 假设管理（V0.3：事实与假设视觉分开，假设永远是"待验证"）----------
+    @app.get("/api/hypotheses")
+    def list_hypotheses() -> dict:
+        items = hypothesis_store.list_hypotheses()
+        return {
+            "total": len(items),
+            "items": [h.to_public_dict() for h in items],
+        }
+
+    @app.get("/api/hypotheses/{hypo_id}")
+    def get_hypothesis(hypo_id: str) -> dict:
+        detail = hypothesis_store.get_detail(hypo_id)
+        if detail is None:
+            return JSONResponse({"ok": False, "error": "假设不存在"},
+                                status_code=404)
+        return {"ok": True, "hypothesis": detail}
+
+    @app.post("/api/hypotheses/{hypo_id}/confirm")
+    def confirm_hypothesis(hypo_id: str) -> dict:
+        """用户确认：只改状态，不动置信度（确认 ≠ 系统很确定）。"""
+        return {"ok": hypothesis_store.confirm(hypo_id)}
+
+    @app.post("/api/hypotheses/{hypo_id}/reject")
+    def reject_hypothesis(hypo_id: str, req: HypothesisRejectRequest) -> dict:
+        """用户否决：建反证 + 置信度压到 0.25 + 状态 rejected。"""
+        return {"ok": hypothesis_store.reject(hypo_id, req.reason,
+                                              channel="trust_ui")}
+
+    @app.delete("/api/hypotheses/{hypo_id}")
+    def delete_hypothesis(hypo_id: str) -> dict:
+        """删除即失效：后续对话不再使用这条假设。"""
+        found = hypothesis_store.delete_entry(hypo_id)
+        return {"ok": found, "found": found}
+
+    @app.post("/api/hypotheses/{hypo_id}/restore")
+    def restore_hypothesis(hypo_id: str) -> dict:
+        found = hypothesis_store.restore_entry(hypo_id)
+        return {"ok": found, "found": found}
 
     # ---------- 记忆管理（查看/删除/导出/暂停）----------
     @app.get("/api/memories")
