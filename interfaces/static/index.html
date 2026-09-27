@@ -208,6 +208,16 @@
     <div id="ctxHistory" class="ctxhist" hidden></div>
   </section>
 
+  <!-- ④′ 待验证假设（V0.3：AI 的猜测，不是事实） -->
+  <section class="card">
+    <h2>🔍 待验证假设 <small>AI 对你的猜测——它知道这只是猜测，你可以确认 · 否决 · 删除</small></h2>
+    <div class="row tools">
+      <button id="btnHypoRefresh">↻ 刷新</button>
+    </div>
+    <ul id="hypoList" class="memlist"></ul>
+    <div id="hypoEmpty" class="hint" hidden>还没有假设。等它从你的行为里看出重复的模式，才会谨慎地提一个——宁可少猜，不乱猜。</div>
+  </section>
+
   <!-- ⑤ 记忆库 -->
   <section class="card">
     <h2>⑤ 记忆库 <small>你拥有它：可查看 · 删除 · 导出 · 暂停</small></h2>
@@ -559,6 +569,65 @@ $('btnCtxHistory').addEventListener('click', async () => {
   } catch (e) { box.innerHTML = '<span class="tag">读取失败</span>'; box.hidden = false; }
 });
 
+/* ---------- 待验证假设（V0.3：事实与假设视觉分开） ---------- */
+const HYPO_STATUS = { tentative: '待验证', confirmed: '用户已确认', rejected: '已否决', deleted: '已删除' };
+const HYPO_POL = { support: '支持', contradict: '反证' };
+
+async function loadHypos() {
+  try {
+    const r = await api('/api/hypotheses');
+    $('hypoEmpty').hidden = r.items.length > 0;
+    $('hypoList').innerHTML = r.items.map(h => `
+      <li class="mem">
+        <span class="when">🔍 ${esc(HYPO_STATUS[h.status] || h.status)} · 置信度 ${esc(String(h.confidence))}</span>
+        <span class="desc">${esc(h.statement)}
+          <small>范围：${esc(h.scope)} · 支持 ${h.support_count} · 反证 ${h.contradict_count} · 已参与回答 ${h.used_count} 次</small>
+          <small class="hypev" hidden></small>
+        </span>
+        <span>
+          <button data-hypo-ev="${esc(h.id)}">证据</button>
+          <button data-hypo-ok="${esc(h.id)}">确认</button>
+          <button data-hypo-no="${esc(h.id)}">否决</button>
+          <button data-hypo-del="${esc(h.id)}">删除</button>
+        </span>
+      </li>`).join('');
+    $('hypoList').querySelectorAll('[data-hypo-ev]').forEach(b =>
+      b.addEventListener('click', async () => {
+        const box = b.closest('li').querySelector('.hypev');
+        if (!box.hidden) { box.hidden = true; return; }
+        try {
+          const d = await api('/api/hypotheses/' + b.dataset.hypoEv);
+          const ev = d.hypothesis.evidence || [];
+          box.innerHTML = ev.length
+            ? ev.map(e => `<span class="tag">${esc(HYPO_POL[e.polarity] || e.polarity)} · ${esc(e.source_type)}：${esc((e.excerpt || '').slice(0, 60))}</span>`).join('')
+            : '<span class="tag">暂无证据</span>';
+        } catch (e) { box.innerHTML = '<span class="tag">读取失败</span>'; }
+        box.hidden = false;
+      }));
+    $('hypoList').querySelectorAll('[data-hypo-ok]').forEach(b =>
+      b.addEventListener('click', async () => {
+        await api('/api/hypotheses/' + b.dataset.hypoOk + '/confirm', { method: 'POST' });
+        loadHypos();
+      }));
+    $('hypoList').querySelectorAll('[data-hypo-no]').forEach(b =>
+      b.addEventListener('click', async () => {
+        const reason = prompt('它哪里猜错了？（会作为反证记下来）', '');
+        if (reason === null) return;
+        await api('/api/hypotheses/' + b.dataset.hypoNo + '/reject',
+          { method: 'POST', body: JSON.stringify({ reason: reason.trim() }) });
+        loadHypos(); loadStatus();
+      }));
+    $('hypoList').querySelectorAll('[data-hypo-del]').forEach(b =>
+      b.addEventListener('click', async () => {
+        if (!confirm('删除这条假设？删除后它不会再用这条假设辅助判断。')) return;
+        await api('/api/hypotheses/' + b.dataset.hypoDel, { method: 'DELETE' });
+        loadHypos(); loadStatus();
+      }));
+  } catch (e) { /* 静默 */ }
+}
+
+$('btnHypoRefresh').addEventListener('click', loadHypos);
+
 /* ---------- 记忆库 ---------- */
 async function loadMemories() {
   try {
@@ -709,7 +778,7 @@ async function loadDataInfo() {
         try {
           const r2 = await api('/api/data/restore', { method: 'POST', body: JSON.stringify({ name: btn.dataset.restore }) });
           dataHint(`已恢复（安全网：${r2.safety_backup || '无'}）· 理解 ${r2.counts?.context_entries ?? '?'} 条 · 记忆 ${r2.counts?.events ?? '?'} 条`, false);
-          loadStatus(); loadMemories(); loadContext(); loadChatHistory(); loadModelSettings(); loadDataInfo();
+          loadStatus(); loadMemories(); loadContext(); loadHypos(); loadChatHistory(); loadModelSettings(); loadDataInfo();
         } catch (e) {
           dataHint(e.message, true);
         } finally { busy(btn, false); }
@@ -744,7 +813,7 @@ $('dataImport').addEventListener('change', async (ev) => {
     const r = await res.json().catch(() => null);
     if (!res.ok || !r?.ok) throw new Error(r?.error || ('导入失败（HTTP ' + res.status + '）'));
     dataHint(`导入成功 · 理解 ${r.counts?.context_entries ?? '?'} 条 · 记忆 ${r.counts?.events ?? '?'} 条`, false);
-    loadStatus(); loadMemories(); loadContext(); loadChatHistory(); loadModelSettings(); loadDataInfo();
+    loadStatus(); loadMemories(); loadContext(); loadHypos(); loadChatHistory(); loadModelSettings(); loadDataInfo();
   } catch (e) {
     dataHint(e.message, true);
   }
@@ -753,7 +822,7 @@ $('dataImport').addEventListener('change', async (ev) => {
 $('btnDataRefresh').addEventListener('click', loadDataInfo);
 
 /* ---------- 初始化 ---------- */
-loadStatus(); loadMemories(); loadContext(); loadChatHistory(); loadModelSettings(); loadDataInfo();
+loadStatus(); loadMemories(); loadContext(); loadHypos(); loadChatHistory(); loadModelSettings(); loadDataInfo();
 setInterval(loadStatus, 15000);
 </script>
 </body>

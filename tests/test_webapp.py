@@ -288,3 +288,13 @@ def test_hypotheses_full_flow(client):
     assert c.get("/api/hypotheses/" + "0" * 32).status_code == 404
     got = c.post("/api/hypotheses/" + "0" * 32 + "/confirm").json()
     assert got == {"ok": False}
+
+
+def test_hypotheses_ui_block_present(client):
+    """H5-UI：首页含有独立假设区块（与④视觉分开），JS 接线存在。"""
+    c, _, _ = client
+    html = c.get("/").text
+    assert "待验证假设" in html
+    assert "hypoList" in html and "loadHypos" in html
+    # ④ 信任界面不受影响
+    assert "它对你的理解" in html
