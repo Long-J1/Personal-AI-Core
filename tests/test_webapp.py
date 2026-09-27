@@ -335,3 +335,12 @@ def test_context_export_includes_hypotheses(client):
     assert "hypotheses" in body
     assert body["hypotheses"]["counts"]["hypotheses"] == 1
     assert body["hypotheses"]["hypotheses"][0]["id"] == h.id
+
+
+def test_status_model_service_ms_present(client):
+    """status 带 ping 耗时字段（UI 三态徽章依据）."""
+    c, _, _ = client
+    s = c.get("/api/status").json()
+    assert "model_service_ms" in s
+    assert s["model_service_ms"] is None or isinstance(
+        s["model_service_ms"], int)

@@ -314,8 +314,19 @@ async function loadStatus() {
     $('evtBadge').textContent = s.events + ' 条记忆';
     $('ctxBadge').textContent = (s.context_entries ?? 0) + ' 条理解';
     const ok = s.model_service_ok;
-    $('modelBadge').textContent = ok ? '模型在线' : '模型离线';
-    $('modelBadge').className = 'badge' + (ok ? '' : ' off');
+    if (ok === true) {
+      $('modelBadge').textContent = '模型在线';
+      $('modelBadge').className = 'badge';
+    } else if (ok === false) {
+      // False 不一定是真离线：status 的 ping 限死 0.8s，云端走代理慢了也会 False
+      $('modelBadge').textContent = '模型响应慢';
+      $('modelBadge').className = 'badge off';
+    } else {
+      $('modelBadge').textContent = '模型状态未知';
+      $('modelBadge').className = 'badge off';
+    }
+    $('modelBadge').title = s.model_service_ms != null
+      ? `ping 耗时约 ${s.model_service_ms}ms（>800ms 会显示“响应慢”，不影响实际对话）` : '';
     $('footModel').textContent = s.model;
     $('btnPause').textContent = s.paused ? '▶ 恢复记录' : '⏸ 暂停记录';
   } catch (e) {
@@ -345,7 +356,7 @@ function fileToB64(file, maxSide = 1280) {
 async function observeB64(b64, source) {
   const hint = $('observeHint');
   show(hint);
-  hint.innerHTML = '<span class="spin"></span>模型观察中…（首次调用需加载模型，约 20-60 秒）';
+  hint.innerHTML = '<span class="spin"></span>模型观察中…（通常约 10 秒，本地模型首次加载可能稍久）';
   $('observeResult').hidden = true;
   try {
     const r = await api('/api/observe', {
@@ -487,7 +498,7 @@ async function sendMsg() {
   addBubble('user', text);
   const hint = $('chatHint');
   show(hint); hint.className = 'hint';
-  hint.innerHTML = '<span class="spin"></span>思考中…（首次约 20-60 秒）';
+  hint.innerHTML = '<span class="spin"></span>思考中…（通常约 10 秒，本地模型首次加载可能稍久）';
   $('btnSend').disabled = true;
   try {
     const r = await api('/api/conversation', {
@@ -579,7 +590,7 @@ async function loadHypos() {
     $('hypoEmpty').hidden = r.items.length > 0;
     $('hypoList').innerHTML = r.items.map(h => `
       <li class="mem">
-        <span class="when">🔍 ${esc(HYPO_STATUS[h.status] || h.status)} · 置信度 ${esc(String(h.confidence))}</span>
+        <span class="when">🔍 ${esc(HYPO_STATUS[h.status] || h.status)} · 置信度 ${Math.round(Number(h.confidence) * 100)}%</span>
         <span class="desc">${esc(h.statement)}
           <small>范围：${esc(h.scope)} · 支持 ${h.support_count} · 反证 ${h.contradict_count} · 已参与回答 ${h.used_count} 次</small>
           <small class="hypev" hidden></small>

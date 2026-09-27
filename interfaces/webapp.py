@@ -156,14 +156,20 @@ def create_app(
     def status() -> dict:
         ping = getattr(model, "ping", None)
         service_ok = None
+        service_ms: int | None = None
         if callable(ping):
             # 限死 0.8s：status 是桌面壳的健康探针，绝不能被模型网络拖过探测超时
             # （踩过的坑：ping 默认 2s 走代理 > 壳子 2s 探测线 → Core 活着却永远"没起来"）
+            # 耗时一并返回：UI 据此显示"在线/离线/未知"，False 不一定是真离线（可能只是慢）
             try:
+                t0 = time.perf_counter()
                 service_ok = bool(ping(timeout=0.8))
+                service_ms = round((time.perf_counter() - t0) * 1000)
             except TypeError:  # 某些实现的 ping() 不收 timeout
                 try:
+                    t0 = time.perf_counter()
                     service_ok = bool(ping())
+                    service_ms = round((time.perf_counter() - t0) * 1000)
                 except Exception:
                     service_ok = False
             except Exception:
@@ -175,9 +181,10 @@ def create_app(
             "events": store.count_events(),
             "context_entries": context_store.count_active(),
             "hypotheses": _safe_hyp_count(),
+            "model_service_ok": service_ok,
+            "model_service_ms": service_ms,
             "sessions": chat_store.count_sessions(),
             "paused": store.paused,
-            "model_service_ok": service_ok,
         }
 
     # ---------- 模型设置（D009：换模型不换"它"） ----------
