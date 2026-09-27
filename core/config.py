@@ -46,6 +46,9 @@ class Settings:
     deposit_max_new: int = 3              # 单轮最多新增几条理解（防模型刷屏）
     deposit_max_chars: int = 200          # 单条理解内容长度上限
 
+    # Personal Hypotheses（V0.3）
+    hypotheses_max_prompt: int = 3        # 进入提示词的假设条数上限
+
     # 日志
     log_level: str = os.environ.get("PAI_LOG_LEVEL", "INFO")
 

@@ -15,11 +15,13 @@ import time
 from dataclasses import dataclass
 
 from memory.context_store import KIND_LABELS, ContextEntry, ContextStore
+from memory.hypothesis_store import STATUS_LABELS, HypothesisStore
 from memory.store import MemoryStore
 from models.base import BaseModelAdapter
 
 from .config import Settings, settings as default_settings
 from .deposit import Depositor, DepositResult
+from .inducer import Inducer
 
 log = logging.getLogger("core.conversation")
 
@@ -47,6 +49,7 @@ class ChatReply:
     deposit: dict | None = None            # 沉淀结果（暂停时为 None）
     paused: bool = False
     duration_s: float = 0.0
+    hypotheses_used: list[dict] | None = None  # V0.3：本次进入 Prompt 的假设
 
     def to_dict(self) -> dict:
         return {
@@ -57,6 +60,7 @@ class ChatReply:
             "deposit": self.deposit,
             "paused": self.paused,
             "duration_s": round(self.duration_s, 2),
+            "hypotheses_used": self.hypotheses_used or [],
         }
 
 
@@ -83,6 +87,7 @@ class ConversationService:
         *,
         chat_store=None,
         settings: Settings | None = None,
+        hypothesis_store: HypothesisStore | None = None,
     ):
         from memory.chat_store import ChatStore  # 局部导入避免循环
 
@@ -91,7 +96,12 @@ class ConversationService:
         self.model = model
         self.settings = settings or default_settings
         self.chat_store = chat_store or ChatStore(store.db_path)
-        self.depositor = Depositor(context_store, store, model, settings=self.settings)
+        # V0.3：默认与记忆同库（零配置）；测试可注入独立实例
+        self.hyp = hypothesis_store or HypothesisStore(store.db_path)
+        self.depositor = Depositor(context_store, store, model,
+                                   settings=self.settings,
+                                   hypothesis_store=self.hyp)
+        self.inducer = Inducer(store, context_store, self.hyp)
         # 话题命中复用回忆的检索级联（D003；模型只是构造需要，不参与检索）
         from .context import Recaller
 
@@ -100,10 +110,24 @@ class ConversationService:
     # ---------- 组装 ----------
     def _assemble(
         self, session_id: str, entries: list[ContextEntry], message: str
-    ) -> tuple[list[dict], list[str]]:
+    ) -> tuple[list[dict], list[str], list]:
         from .context import plan_query
 
         directives = derive_directives(entries)
+
+        # V0.3：待验证假设进 Prompt——单独段、降权标记，绝不当事实
+        hyps = self.hyp.list_for_prompt(
+            limit=self.settings.hypotheses_max_prompt)
+        if hyps:
+            lines = []
+            for h in hyps:
+                tag = ("用户已确认" if h.status == "confirmed"
+                       else "待验证")
+                lines.append(
+                    f"- [{tag}·置信度{h.confidence:.2f}] {h.statement}")
+            hypo_block = "\n".join(lines)
+        else:
+            hypo_block = "（暂无）"
 
         # 近期事件 + 话题命中的更早事件（B1：重提旧事），合并去重
         matched, _ = self._recaller.retrieve(plan_query(message))
@@ -126,6 +150,11 @@ class ConversationService:
             directives_block="\n".join(f"- {d}" for d in directives) or "（暂无）",
             events_block="\n".join(e.context_line() for e in events) or "（暂无）",
         )
+        if hyps:
+            system += (
+                "\n\n=== 待验证假设（辅助判断用，不是事实；"
+                "若与用户当下所说冲突，以用户为准）===\n" + hypo_block
+            )
         messages: list[dict] = [{"role": "system", "content": system}]
         messages.extend(
             {"role": m["role"], "content": m["content"]} for m in history
@@ -137,14 +166,16 @@ class ConversationService:
             label = KIND_LABELS.get(e.kind, e.kind)
             kinds[label] = kinds.get(label, 0) + 1
         log.info(
-            "上下文组装：理解 %d 条（%s）· 事件 %d 条（话题命中 %d）· 会话历史 %d 条",
+            "上下文组装：理解 %d 条（%s）· 事件 %d 条（话题命中 %d）·"
+            " 会话历史 %d 条 · 待验证假设 %d 条",
             len(entries),
             "、".join(f"{k}{v}" for k, v in kinds.items() if v) or "无",
             len(events),
             len(matched),
             len(history),
+            len(hyps),
         )
-        return messages, directives
+        return messages, directives, hyps
 
     # ---------- 主流程 ----------
     def chat(
@@ -158,7 +189,7 @@ class ConversationService:
 
         # ---- 读 ----
         entries = self.ctx.list_entries(limit=self.settings.context_max_entries)
-        messages, directives = self._assemble(sid, entries, message)
+        messages, directives, hyps = self._assemble(sid, entries, message)
         messages.append({"role": "user", "content": message})
 
         answer = self.model.chat(
@@ -176,8 +207,18 @@ class ConversationService:
             self.ctx.mark_used(e.id for e in entries)
             for e in entries:  # 内存对象同步（回复里的 used_count 是"用过之后"）
                 e.used_count += 1
+            if hyps:
+                self.hyp.mark_used([h.id for h in hyps])
             result: DepositResult = self.depositor.deposit(message, answer, entries)
             deposit = result.to_dict()
+            # V0.3：沉淀后跑规则归纳（后台路径；失败只记日志，不打断对话）
+            try:
+                induced = self.inducer.induce_all()
+                if induced.touched:
+                    log.info("归纳：新建 %d / 补证据 %d",
+                             len(induced.created), len(induced.linked))
+            except Exception as exc:
+                log.warning("归纳失败（跳过）：%s", exc)
             self.chat_store.append(sid, "user", message)
             self.chat_store.append(sid, "assistant", answer)
 
@@ -189,6 +230,7 @@ class ConversationService:
             deposit=deposit,
             paused=paused,
             duration_s=time.perf_counter() - started,
+            hypotheses_used=[h.to_public_dict() for h in hyps],
         )
         log.info(
             "对话完成 session=%s 判断=%s 沉淀=%s 耗时=%.1fs",

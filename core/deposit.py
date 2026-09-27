@@ -69,11 +69,13 @@ class Depositor:
         model: BaseModelAdapter,
         *,
         settings: Settings | None = None,
+        hypothesis_store=None,  # V0.3：纠正→假设联动；None 即关闭（注入兼容）
     ):
         self.ctx = context_store
         self.store = memory_store
         self.model = model
         self.settings = settings or default_settings
+        self.hyp = hypothesis_store
 
     # ---------- 提示词 ----------
     @staticmethod
@@ -130,7 +132,7 @@ class Depositor:
             return result
 
         alias_map = {f"#{i}": e for i, e in enumerate(entries, start=1)}
-        self._apply_corrections(data, alias_map, result)
+        self._apply_corrections(data, alias_map, result, user_text)
         self._apply_creates(data, result)
         self._apply_event(data, result)
         return result
@@ -141,6 +143,7 @@ class Depositor:
         data: dict,
         alias_map: dict[str, ContextEntry],
         result: DepositResult,
+        user_text: str = "",
     ) -> None:
         corrections = data.get("corrections")
         if not isinstance(corrections, list):
@@ -174,6 +177,15 @@ class Depositor:
                 )
                 # 列表里的旧内容同步失效（本轮后续步骤用不上了，但保持一致）
                 target.content = content
+                # V0.3：纠正→假设联动（以该条目为证据的假设吃反证/被否决）
+                if self.hyp is not None:
+                    try:
+                        hit = self.hyp.record_correction_hit(
+                            target.id, user_text, reason)
+                        if hit:
+                            log.info("纠正联动假设：%s", [h[:8] for h in hit])
+                    except Exception as exc:  # 联动失败不影响沉淀本身
+                        log.warning("纠正联动假设失败（跳过）：%s", exc)
 
     def _apply_creates(self, data: dict, result: DepositResult) -> None:
         new_items = data.get("new")
