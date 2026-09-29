@@ -22,6 +22,7 @@ from models.base import BaseModelAdapter, ModelError
 from .config import Settings, settings as default_settings
 from .deposit import Depositor, DepositResult
 from .inducer import Inducer
+from .verifier import resolve_pending_answer, select_candidate
 
 log = logging.getLogger("core.conversation")
 
@@ -50,6 +51,7 @@ class ChatReply:
     paused: bool = False
     duration_s: float = 0.0
     hypotheses_used: list[dict] | None = None  # V0.3：本次进入 Prompt 的假设
+    verification_question: dict | None = None  # V0.4：本轮附带的问题，无则 None
 
     def to_dict(self) -> dict:
         return {
@@ -61,6 +63,7 @@ class ChatReply:
             "paused": self.paused,
             "duration_s": round(self.duration_s, 2),
             "hypotheses_used": self.hypotheses_used or [],
+            "verification_question": self.verification_question,
         }
 
 
@@ -194,6 +197,20 @@ class ConversationService:
         sid = self.chat_store.get_or_create_session(session_id)
         paused = self.store.paused
 
+        # V0.4：先解决上一轮挂起的验证问题（确认/否决立即生效，
+        # 本轮 prompt 就能用上），再组装。暂停时不学不问。
+        verification_in = None
+        if not paused:
+            try:
+                verification_in = resolve_pending_answer(self.hyp, message)
+            except Exception as exc:  # 双保险：绝不断对话
+                log.warning("验证回答处理失败（跳过）：%s", exc)
+                verification_in = None
+            if verification_in is not None:
+                log.info("验证回答落链：假设 %s → %s",
+                         verification_in["hypothesis_id"][:8],
+                         verification_in["verdict"])
+
         # ---- 读 ----
         entries = self.ctx.list_entries(limit=self.settings.context_max_entries)
         messages, directives, hyps = self._assemble(sid, entries, message)
@@ -205,6 +222,29 @@ class ConversationService:
         if not answer:
             # 空回答不是回答：按模型故障处理（503），不拿空白糊弄用户
             raise ModelError("模型返回了空回答")
+
+        # V0.4：回答生成后，顺带选一个验证问题附在末尾（低存在感附加）。
+        # 沉淀用模型原文（不含我们的问题），历史存用户实际看到的版本。
+        model_answer = answer
+        verification_out = None
+        if not paused:
+            try:
+                picked = select_candidate(self.hyp, message, paused=False)
+            except Exception as exc:
+                log.warning("验证对象选择失败（本轮不问）：%s", exc)
+                picked = None
+            if picked is not None:
+                cand, question = picked
+                try:
+                    ok, why = self.hyp.set_pending(cand.id, question.text)
+                except Exception as exc:
+                    log.warning("挂起验证问题失败（本轮不问）：%s", exc)
+                    ok, why = False, str(exc)
+                if ok:
+                    verification_out = question.to_dict()
+                    answer = model_answer + "\n\n" + question.text
+                else:
+                    log.info("验证问题未挂起（%s），本轮不问", why)
 
         # 判断可断言：指令存在 → approach = 指令；否则默认
         approach = directives or ["default"]
@@ -223,10 +263,11 @@ class ConversationService:
                 except Exception as exc:
                     log.warning("假设使用计数失败（跳过）：%s", exc)
             # 沉淀自称"绝不抛异常"，这里再加一道保险：沉淀的任何失败
-            # （如 sqlite 锁）都不许吞掉用户已经拿到的回答
+            # （如 sqlite 锁）都不许吞掉用户已经拿到的回答。
+            # 注意：沉淀吃的是模型原文，不含我们附带的问题（问不算答）。
             try:
                 result: DepositResult = self.depositor.deposit(
-                    message, answer, entries)
+                    message, model_answer, entries)
             except Exception as exc:
                 log.error("沉淀异常（本轮跳过沉淀）：%s", exc)
                 result = DepositResult(error=f"沉淀异常，已跳过：{exc}")
@@ -251,13 +292,16 @@ class ConversationService:
             paused=paused,
             duration_s=time.perf_counter() - started,
             hypotheses_used=[h.to_public_dict() for h in hyps],
+            verification_question=verification_out,
         )
         log.info(
-            "对话完成 session=%s 判断=%s 沉淀=%s 耗时=%.1fs",
+            "对话完成 session=%s 判断=%s 沉淀=%s 耗时=%.1fs%s",
             sid[:8],
             approach if len(approach) <= 2 else f"{len(approach)}条指令",
             "跳过（暂停）" if deposit is None else
             f"新增{len(deposit['created'])}/纠正{len(deposit['corrected'])}",
             reply.duration_s,
+            (" 验证提问=" + verification_out["hypothesis_id"][:8])
+            if verification_out else "",
         )
         return reply

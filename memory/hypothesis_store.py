@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS hypotheses (
   support_count INTEGER NOT NULL DEFAULT 0,
   contradict_count INTEGER NOT NULL DEFAULT 0,
   used_count INTEGER NOT NULL DEFAULT 0,
+  asked_count INTEGER NOT NULL DEFAULT 0,
+  last_asked_epoch REAL NOT NULL DEFAULT 0,
+  pending_question TEXT NOT NULL DEFAULT '',
   created_at_iso TEXT NOT NULL,
   created_at_epoch REAL NOT NULL,
   updated_at_iso TEXT NOT NULL,
@@ -131,6 +134,7 @@ class Hypothesis:
     __slots__ = (
         "id", "statement", "confidence", "status", "scope",
         "support_count", "contradict_count", "used_count",
+        "asked_count", "last_asked_epoch", "pending_question",
         "created_at", "updated_at",
     )
 
@@ -146,6 +150,9 @@ class Hypothesis:
         used_count: int,
         created_at: datetime,
         updated_at: datetime,
+        asked_count: int = 0,
+        last_asked_epoch: float = 0.0,
+        pending_question: str = "",
     ):
         self.id = id
         self.statement = statement
@@ -155,6 +162,9 @@ class Hypothesis:
         self.support_count = support_count
         self.contradict_count = contradict_count
         self.used_count = used_count
+        self.asked_count = asked_count
+        self.last_asked_epoch = last_asked_epoch
+        self.pending_question = pending_question
         self.created_at = created_at
         self.updated_at = updated_at
 
@@ -185,6 +195,19 @@ class HypothesisStore:
         self._lock = threading.Lock()
         with closing(self._connect()) as con:
             con.executescript(_SCHEMA)
+            # V0.4 migration：老库的 hypotheses 表没有提问列，原地补上
+            cols = {r[1] for r in con.execute(
+                "PRAGMA table_info(hypotheses)").fetchall()}
+            with con:
+                if "asked_count" not in cols:
+                    con.execute("ALTER TABLE hypotheses ADD COLUMN"
+                                " asked_count INTEGER NOT NULL DEFAULT 0")
+                if "last_asked_epoch" not in cols:
+                    con.execute("ALTER TABLE hypotheses ADD COLUMN"
+                                " last_asked_epoch REAL NOT NULL DEFAULT 0")
+                if "pending_question" not in cols:
+                    con.execute("ALTER TABLE hypotheses ADD COLUMN"
+                                " pending_question TEXT NOT NULL DEFAULT ''")
             con.commit()
         log.info("Personal Hypotheses 就绪：%s", self.db_path)
 
@@ -235,12 +258,18 @@ class HypothesisStore:
     # ---------- 读取 ----------
     @staticmethod
     def _row_to_hypo(row: sqlite3.Row) -> Hypothesis:
+        keys = set(row.keys())
         return Hypothesis(
             id=row["id"], statement=row["statement"],
             confidence=row["confidence"], status=row["status"],
             scope=row["scope"], support_count=row["support_count"],
             contradict_count=row["contradict_count"],
             used_count=row["used_count"],
+            asked_count=row["asked_count"] if "asked_count" in keys else 0,
+            last_asked_epoch=(row["last_asked_epoch"]
+                              if "last_asked_epoch" in keys else 0.0),
+            pending_question=(row["pending_question"]
+                              if "pending_question" in keys else ""),
             created_at=datetime.fromisoformat(row["created_at_iso"]),
             updated_at=datetime.fromisoformat(row["updated_at_iso"]),
         )
@@ -385,7 +414,8 @@ class HypothesisStore:
             if hit:
                 return True
             hit = con.execute(
-                "SELECT id FROM hypothesis_log WHERE id=? AND action='reject'",
+                "SELECT id FROM hypothesis_log WHERE id=? AND action IN"
+                " ('reject', 'verify_confirm')",
                 (source_id,),
             ).fetchone()
             return bool(hit)
@@ -557,8 +587,10 @@ class HypothesisStore:
             if row["status"] == "confirmed":
                 return True
             with con:
+                # 任何渠道的解决（UI/对话）都清 pending：问题已答，不许留 stale
                 con.execute(
-                    "UPDATE hypotheses SET status='confirmed', updated_at_iso=?,"
+                    "UPDATE hypotheses SET status='confirmed',"
+                    " pending_question='', updated_at_iso=?,"
                     " updated_at_epoch=? WHERE id=?",
                     (now.isoformat(), now.timestamp(), hypo_id),
                 )
@@ -611,6 +643,7 @@ class HypothesisStore:
                 con.execute(
                     "UPDATE hypotheses SET confidence=?, status='rejected',"
                     " contradict_count = contradict_count + 1,"
+                    " pending_question='',"
                     " updated_at_iso=?, updated_at_epoch=? WHERE id=?",
                     (CORRECTION_SET, now.isoformat(), now.timestamp(), hypo_id),
                 )
@@ -654,6 +687,143 @@ class HypothesisStore:
             affected.append(hid)
         return affected
 
+    # ---------- V0.4 验证提问：pending 状态 ----------
+    def get_pending(self) -> Hypothesis | None:
+        """全局唯一的挂起问题（没有则 None）。"""
+        with closing(self._connect()) as con:
+            row = con.execute(
+                "SELECT * FROM hypotheses WHERE pending_question != ''"
+                " ORDER BY updated_at_epoch DESC LIMIT 1",
+            ).fetchone()
+        return self._row_to_hypo(row) if row else None
+
+    def set_pending(self, hypo_id: str, question: str) -> tuple[bool, str | None]:
+        """挂起一个验证问题：计数+1、刷新冷却起点、记 ask 日志。"""
+        question = (question or "").strip()
+        if not question:
+            return False, "问题文本为空"
+        now = _now()
+        with self._lock, closing(self._connect()) as con:
+            row = con.execute(
+                "SELECT status FROM hypotheses WHERE id=?", (hypo_id,)
+            ).fetchone()
+            if not row:
+                return False, "假设不存在"
+            if row["status"] != "tentative":
+                return False, f"只有待验证假设能挂问题（当前 {row['status']}）"
+            other = con.execute(
+                "SELECT id FROM hypotheses WHERE pending_question != ''"
+                " AND id != ? LIMIT 1",
+                (hypo_id,),
+            ).fetchone()
+            if other:
+                return False, "已有挂起问题，同时只挂一个"
+            with con:
+                con.execute(
+                    "UPDATE hypotheses SET pending_question=?,"
+                    " asked_count = asked_count + 1,"
+                    " last_asked_epoch=?, updated_at_iso=?, updated_at_epoch=?"
+                    " WHERE id=?",
+                    (question[:500], now.timestamp(), now.isoformat(),
+                     now.timestamp(), hypo_id),
+                )
+                self._log(con, "ask", hypo_id, None, None,
+                          {"question": question[:500]})
+        log.info("假设 %s 挂起验证问题（第 %d 问）", hypo_id[:8],
+                 self.get(hypo_id).asked_count)
+        return True, None
+
+    def clear_pending(self, hypo_id: str) -> bool:
+        with self._lock, closing(self._connect()) as con:
+            row = con.execute(
+                "SELECT pending_question FROM hypotheses WHERE id=?",
+                (hypo_id,),
+            ).fetchone()
+            if not row or not row["pending_question"]:
+                return False
+            with con:
+                con.execute(
+                    "UPDATE hypotheses SET pending_question='' WHERE id=?",
+                    (hypo_id,),
+                )
+        return True
+
+    def note_evasive(self, hypo_id: str) -> bool:
+        """用户回避作答：不清挂起，但刷新冷却（不立刻重问），记审计。"""
+        now = _now()
+        with self._lock, closing(self._connect()) as con:
+            row = con.execute(
+                "SELECT confidence FROM hypotheses WHERE id=?", (hypo_id,)
+            ).fetchone()
+            if not row:
+                return False
+            with con:
+                con.execute(
+                    "UPDATE hypotheses SET last_asked_epoch=?,"
+                    " updated_at_iso=?, updated_at_epoch=? WHERE id=?",
+                    (now.timestamp(), now.isoformat(), now.timestamp(),
+                     hypo_id),
+                )
+                self._log(con, "evasive", hypo_id, row["confidence"],
+                          row["confidence"], {})
+        return True
+
+    def record_verification_confirm(
+        self, hypo_id: str, user_text: str
+    ) -> bool:
+        """用户亲口确认验证问题：confirm（置信度不动）+ 回答作为 support
+        证据入链（追溯到本次确认行为），清 pending。
+
+        注意：这是有意的例外——用户 verdict 不是统计证据，所以 confidence
+        不走 +0.08；但 support_count 照常 +1（证据链完整）。
+        """
+        user_text = (user_text or "").strip()[:200]
+        if not user_text:
+            return False
+        now = _now()
+        with self._lock, closing(self._connect()) as con:
+            row = con.execute(
+                "SELECT status, confidence FROM hypotheses WHERE id=?",
+                (hypo_id,),
+            ).fetchone()
+            if not row or row["status"] == "deleted":
+                return False
+            conf = float(row["confidence"])
+            with con:
+                log_id = uuid.uuid4().hex
+                con.execute(
+                    "INSERT INTO hypothesis_log (id, epoch, iso, action,"
+                    " hypothesis_id, conf_before, conf_after, detail)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (log_id, now.timestamp(), now.isoformat(),
+                     "verify_confirm", hypo_id, conf, conf,
+                     json.dumps({"answer": user_text, "channel": "verification"},
+                                ensure_ascii=False)),
+                )
+                con.execute(
+                    "INSERT INTO hypothesis_evidence (id, hypothesis_id,"
+                    " polarity, source_type, source_id, origin, excerpt, detail,"
+                    " created_at_iso, created_at_epoch)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (uuid.uuid4().hex, hypo_id, "support", "correction",
+                     log_id, f"answer:{log_id}", user_text,
+                     json.dumps({"channel": "verification"},
+                                ensure_ascii=False),
+                     now.isoformat(), now.timestamp()),
+                )
+                con.execute(
+                    "UPDATE hypotheses SET status='confirmed',"
+                    " support_count = support_count + 1, pending_question='',"
+                    " updated_at_iso=?, updated_at_epoch=? WHERE id=?",
+                    (now.isoformat(), now.timestamp(), hypo_id),
+                )
+        log.info("假设 %s 被验证确认（置信度保持 %.2f）", hypo_id[:8], conf)
+        return True
+
+    def independent_support_count(self, hypo_id: str) -> int:
+        """公开版独立源计数（verifier 选人用）"""
+        return self._independent_origins(hypo_id)
+
     # ---------- 删除 / 恢复 ----------
     def delete_entry(self, hypo_id: str) -> bool:
         now = _now()
@@ -666,8 +836,8 @@ class HypothesisStore:
                 return False
             with con:
                 con.execute(
-                    "UPDATE hypotheses SET status='deleted', updated_at_iso=?,"
-                    " updated_at_epoch=? WHERE id=?",
+                    "UPDATE hypotheses SET status='deleted', pending_question='',"
+                    " updated_at_iso=?, updated_at_epoch=? WHERE id=?",
                     (now.isoformat(), now.timestamp(), hypo_id),
                 )
                 self._log(con, "delete", hypo_id, row["confidence"],
