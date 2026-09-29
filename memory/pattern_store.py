@@ -321,6 +321,28 @@ class PatternStore:
                 LIVE_STATUSES,
             ).fetchone()[0])
 
+    def set_confidence(self, pattern_id: str, value: float,
+                       reason: str = "") -> bool:
+        """显式置位（仅晋升均值等规则路径用；clamp + 审计，不走 delta）。"""
+        now = _now()
+        with self._lock, closing(self._connect()) as con:
+            row = con.execute(
+                "SELECT confidence FROM patterns WHERE id=?", (pattern_id,)
+            ).fetchone()
+            if not row:
+                return False
+            conf = _clamp(float(value))
+            with con:
+                con.execute(
+                    "UPDATE patterns SET confidence=?, updated_at_iso=?,"
+                    " updated_at_epoch=? WHERE id=?",
+                    (conf, now.isoformat(), now.timestamp(), pattern_id),
+                )
+                self._log(con, "promote" if reason == "promotion-mean"
+                          else "adjust", pattern_id, row["confidence"], conf,
+                          {"reason": reason})
+        return True
+
     def mark_used(self, pattern_ids: list[str]) -> None:
         if not pattern_ids:
             return
