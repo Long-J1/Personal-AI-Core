@@ -48,6 +48,8 @@ class Settings:
 
     # Personal Hypotheses（V0.3）
     hypotheses_max_prompt: int = 3        # 进入提示词的假设条数上限
+    patterns_max_prompt: int = 3         # 进入提示词的已确认规律上限
+    goals_max_prompt: int = 3           # 进入提示词的活跃目标上限
 
     # 日志
     log_level: str = os.environ.get("PAI_LOG_LEVEL", "INFO")

@@ -313,6 +313,16 @@ class PatternStore:
             ).fetchall()
         return [self._row_to_pattern(r) for r in rows]
 
+
+    def count_log_since(self, actions: tuple, since_epoch: float) -> int:
+        """指定时刻之后某类变更次数（周报统计用）。"""
+        marks = ','.join('?' * len(actions))
+        with closing(self._connect()) as con:
+            return int(con.execute(
+                f"SELECT COUNT(*) FROM pattern_log WHERE action IN"
+                f" ({marks}) AND epoch >= ?",
+                (*actions, since_epoch),
+            ).fetchone()[0])
     def count_live(self) -> int:
         with closing(self._connect()) as con:
             return int(con.execute(
@@ -402,7 +412,19 @@ class PatternStore:
         return int(row[0])
 
     def independent_support_count(self, pattern_id: str) -> int:
-        return self._independent_origins(pattern_id)
+        """独立源计数（规律语义）：hypo: 源不计入。
+
+        同簇 confirmed 假设本质是同一批素材的两种说法，数它们等于自己
+        证明自己；独立源只数 context/event/correction/confirmation 行。
+        """
+        with closing(self._connect()) as con:
+            row = con.execute(
+                "SELECT COUNT(DISTINCT origin) FROM pattern_evidence"
+                " WHERE pattern_id=? AND polarity='support'"
+                " AND origin NOT LIKE 'hypo:%'",
+                (pattern_id,),
+            ).fetchone()
+        return int(row[0])
 
     def add_evidence(
         self,

@@ -15,13 +15,28 @@ import time
 from dataclasses import dataclass
 
 from memory.context_store import KIND_LABELS, ContextEntry, ContextStore
+from memory.goal_store import GoalStore
 from memory.hypothesis_store import STATUS_LABELS, HypothesisStore
+from memory.pattern_store import PatternStore
 from memory.store import MemoryStore
 from models.base import BaseModelAdapter, ModelError
 
 from .config import Settings, settings as default_settings
 from .deposit import Depositor, DepositResult
 from .inducer import Inducer
+from .pattern_engine import PatternEngine
+from .verifier import (
+    extract_goal_title,
+    is_goal_declaration,
+    is_pattern_declaration,
+    pattern_scope_for,
+    resolve_goal_answer,
+    resolve_pattern_answer,
+    resolve_pending_answer,
+    select_candidate,
+    select_goal_candidate,
+    select_pattern_candidate,
+)
 from .verifier import resolve_pending_answer, select_candidate
 
 log = logging.getLogger("core.conversation")
@@ -52,6 +67,7 @@ class ChatReply:
     duration_s: float = 0.0
     hypotheses_used: list[dict] | None = None  # V0.3：本次进入 Prompt 的假设
     verification_question: dict | None = None  # V0.4：本轮附带的问题，无则 None
+    patterns_used: list[dict] | None = None  # V0.5：本次进入 Prompt 的规律
 
     def to_dict(self) -> dict:
         return {
@@ -64,6 +80,7 @@ class ChatReply:
             "duration_s": round(self.duration_s, 2),
             "hypotheses_used": self.hypotheses_used or [],
             "verification_question": self.verification_question,
+            "patterns_used": self.patterns_used or [],
         }
 
 
@@ -91,6 +108,8 @@ class ConversationService:
         chat_store=None,
         settings: Settings | None = None,
         hypothesis_store: HypothesisStore | None = None,
+        pattern_store: PatternStore | None = None,
+        goal_store: GoalStore | None = None,
     ):
         from memory.chat_store import ChatStore  # 局部导入避免循环
 
@@ -99,12 +118,15 @@ class ConversationService:
         self.model = model
         self.settings = settings or default_settings
         self.chat_store = chat_store or ChatStore(store.db_path)
-        # V0.3：默认与记忆同库（零配置）；测试可注入独立实例
+        # V0.3/V0.5：默认与记忆同库（零配置）；测试可注入独立实例
         self.hyp = hypothesis_store or HypothesisStore(store.db_path)
+        self.pat = pattern_store or PatternStore(store.db_path)
+        self.goal = goal_store or GoalStore(store.db_path)
         self.depositor = Depositor(context_store, store, model,
                                    settings=self.settings,
                                    hypothesis_store=self.hyp)
         self.inducer = Inducer(store, context_store, self.hyp)
+        self.promoter = PatternEngine(store, self.hyp, self.pat)
         # 话题命中复用回忆的检索级联（D003；模型只是构造需要，不参与检索）
         from .context import Recaller
 
@@ -139,6 +161,22 @@ class ConversationService:
         else:
             hypo_block = "（暂无）"
 
+        # V0.5：已确认规律进 Prompt（独立段，权重高于假设段）；
+        # 活跃目标进 Prompt（只引用标题，不推测）。
+        # 韧性：附属读取失败不许掀翻对话。
+        try:
+            pats = self.pat.list_confirmed(
+                limit=self.settings.patterns_max_prompt)
+        except Exception as exc:
+            log.warning("规律读取失败（本轮跳过规律段）：%s", exc)
+            pats = []
+        try:
+            goals = self.goal.list_active(
+                limit=self.settings.goals_max_prompt)
+        except Exception as exc:
+            log.warning("目标读取失败（本轮跳过目标段）：%s", exc)
+            goals = []
+
         # 近期事件 + 话题命中的更早事件（B1：重提旧事），合并去重
         matched, _ = self._recaller.retrieve(plan_query(message))
         recent = self.store.list_events(limit=self.settings.chat_events_max)
@@ -165,6 +203,23 @@ class ConversationService:
                 "\n\n=== 待验证假设（辅助判断用，不是事实；"
                 "若与用户当下所说冲突，以用户为准）===\n" + hypo_block
             )
+        if pats:
+            pat_lines = []
+            for p in pats:
+                stmt = " ".join(str(p.statement).split())
+                pat_lines.append(
+                    f"- [规律·置信度{p.confidence:.2f}] {stmt}")
+            system += (
+                "\n\n=== 已验证规律（可作为建议依据；"
+                "若与用户当下所说冲突，以用户为准）===\n"
+                + "\n".join(pat_lines)
+            )
+        if goals:
+            goal_lines = [f"- {g.title}" for g in goals]
+            system += (
+                "\n\n=== 他的长期目标（仅引用，不推测；"
+                "建议应尽量与目标同向）===\n" + "\n".join(goal_lines)
+            )
         messages: list[dict] = [{"role": "system", "content": system}]
         messages.extend(
             {"role": m["role"], "content": m["content"]} for m in history
@@ -177,15 +232,83 @@ class ConversationService:
             kinds[label] = kinds.get(label, 0) + 1
         log.info(
             "上下文组装：理解 %d 条（%s）· 事件 %d 条（话题命中 %d）·"
-            " 会话历史 %d 条 · 待验证假设 %d 条",
+            " 会话历史 %d 条 · 待验证假设 %d 条 · 已确认规律 %d 条 ·"
+            " 活跃目标 %d 个",
             len(entries),
             "、".join(f"{k}{v}" for k, v in kinds.items() if v) or "无",
             len(events),
             len(matched),
             len(history),
             len(hyps),
+            len(pats),
+            len(goals),
         )
-        return messages, directives, hyps
+        return messages, directives, hyps, pats
+
+    # ---------- 验证提问选择（假设 → 规律 → 目标，一轮一个）----------
+    def _pick_verification(self, message: str):
+        """返回 (store, candidate, question) 或 None。各 store 内部判空。"""
+        try:
+            if self.hyp.get_pending() is not None:
+                return None
+            if self.pat.get_pending() is not None:
+                return None
+            if self.goal.get_pending() is not None:
+                return None
+        except Exception as exc:
+            log.warning("挂起检查失败（本轮不问）：%s", exc)
+            return None
+        picked = select_candidate(self.hyp, message, paused=False)
+        if picked is not None:
+            cand, question = picked
+            return self.hyp, cand, question
+        picked = select_pattern_candidate(self.pat, message, paused=False)
+        if picked is not None:
+            cand, question = picked
+            return self.pat, cand, question
+        picked = select_goal_candidate(self.goal, message, paused=False)
+        if picked is not None:
+            cand, question = picked
+            return self.goal, cand, question
+        return None
+
+    @staticmethod
+    def _still_askable(kind: str, obj) -> bool:
+        """目标是否仍值得挂着问题：hyp/pattern 限 tentative，goal 限 proposed。"""
+        if obj is None:
+            return False
+        if kind == "goal":
+            return obj.status == "proposed"
+        return obj.status == "tentative"
+
+    def _retract_if_resolved(self, verification_out: dict | None):
+        """收回已解决目标的挂起（本轮写路径可能否决/确认了它）。
+
+        返回传入的元数据（仍可问）或 None（已解决：清挂起 + 元数据置空）。
+        回答正文已发出无法收回，历史保留原文——这是诚实代价，注释在此。
+        """
+        if verification_out is None:
+            return None
+        stores = {"hypothesis": self.hyp, "pattern": self.pat,
+                  "goal": self.goal}
+        kind = verification_out.get("kind", "hypothesis")
+        store_obj = stores.get(kind)
+        if store_obj is None:
+            return verification_out
+        hid = verification_out.get("hypothesis_id", "")
+        try:
+            target = store_obj.get(hid)
+        except Exception:
+            return verification_out
+        if self._still_askable(kind, target):
+            return verification_out
+        try:
+            store_obj.clear_pending(hid)
+        except Exception:
+            pass
+        log.info("验证问题目标已解决，收回挂起：%s %s",
+                 kind, hid[:8])
+        return None
 
     # ---------- 主流程 ----------
     def chat(
@@ -197,23 +320,34 @@ class ConversationService:
         sid = self.chat_store.get_or_create_session(session_id)
         paused = self.store.paused
 
-        # V0.4：先解决上一轮挂起的验证问题（确认/否决立即生效，
+        # V0.4/V0.5：先解决上一轮挂起的验证问题（确认/否决立即生效，
         # 本轮 prompt 就能用上），再组装。暂停时不学不问。
+        # 解决顺序固定：假设 → 规律 → 目标（一次只解决一条，不双重分类）。
         verification_in = None
         if not paused:
             try:
-                verification_in = resolve_pending_answer(self.hyp, message)
+                if self.hyp.get_pending() is not None:
+                    verification_in = resolve_pending_answer(
+                        self.hyp, message)
+                elif self.pat.get_pending() is not None:
+                    verification_in = resolve_pattern_answer(
+                        self.pat, message)
+                elif self.goal.get_pending() is not None:
+                    verification_in = resolve_goal_answer(
+                        self.goal, message)
             except Exception as exc:  # 双保险：绝不断对话
                 log.warning("验证回答处理失败（跳过）：%s", exc)
                 verification_in = None
             if verification_in is not None:
-                log.info("验证回答落链：假设 %s → %s",
+                log.info("验证回答落链：%s %s → %s",
+                         verification_in.get("kind", "hypothesis"),
                          verification_in["hypothesis_id"][:8],
                          verification_in["verdict"])
 
         # ---- 读 ----
         entries = self.ctx.list_entries(limit=self.settings.context_max_entries)
-        messages, directives, hyps = self._assemble(sid, entries, message)
+        messages, directives, hyps, pats = self._assemble(
+            sid, entries, message)
         messages.append({"role": "user", "content": message})
 
         answer = self.model.chat(
@@ -223,20 +357,24 @@ class ConversationService:
             # 空回答不是回答：按模型故障处理（503），不拿空白糊弄用户
             raise ModelError("模型返回了空回答")
 
-        # V0.4：回答生成后，顺带选一个验证问题附在末尾（低存在感附加）。
+        # V0.4/V0.5：回答生成后，顺带选一个验证问题附在末尾（低存在感附加）。
+        # 顺序固定：假设 → 规律 → 目标，一轮只问一个；刚解决完（确认/否决）
+        # 本轮不再问新的（解决了一件事就闭嘴）。
         # 沉淀用模型原文（不含我们的问题），历史存用户实际看到的版本。
         model_answer = answer
         verification_out = None
-        if not paused:
+        resolved = (verification_in is not None
+                    and verification_in.get("verdict") in ("confirm", "deny"))
+        if not paused and not resolved:
             try:
-                picked = select_candidate(self.hyp, message, paused=False)
+                picked = self._pick_verification(message)
             except Exception as exc:
                 log.warning("验证对象选择失败（本轮不问）：%s", exc)
                 picked = None
             if picked is not None:
-                cand, question = picked
+                store_obj, cand, question = picked
                 try:
-                    ok, why = self.hyp.set_pending(cand.id, question.text)
+                    ok, why = store_obj.set_pending(cand.id, question.text)
                 except Exception as exc:
                     log.warning("挂起验证问题失败（本轮不问）：%s", exc)
                     ok, why = False, str(exc)
@@ -262,6 +400,11 @@ class ConversationService:
                     self.hyp.mark_used([h.id for h in hyps])
                 except Exception as exc:
                     log.warning("假设使用计数失败（跳过）：%s", exc)
+            if pats:
+                try:
+                    self.pat.mark_used([p.id for p in pats])
+                except Exception as exc:
+                    log.warning("规律使用计数失败（跳过）：%s", exc)
             # 沉淀自称"绝不抛异常"，这里再加一道保险：沉淀的任何失败
             # （如 sqlite 锁）都不许吞掉用户已经拿到的回答。
             # 注意：沉淀吃的是模型原文，不含我们附带的问题（问不算答）。
@@ -280,6 +423,45 @@ class ConversationService:
                              len(induced.created), len(induced.linked))
             except Exception as exc:
                 log.warning("归纳失败（跳过）：%s", exc)
+            # V0.5：归纳后跑晋升（confirmed 假设组 → tentative 规律）
+            try:
+                promoted = self.promoter.promote_all()
+                if promoted:
+                    log.info("晋升：新建规律 %d 条", len(promoted))
+            except Exception as exc:
+                log.warning("晋升失败（跳过）：%s", exc)
+            # V0.5 B 路径：用户明确表达规律 → 建 tentative（验证后才算数）
+            try:
+                if is_pattern_declaration(message):
+                    scope = pattern_scope_for(message)
+                    pat, why = self.pat.declare_from_user(
+                        message.strip()[:300], scope, message)
+                    if pat is not None:
+                        log.info("B 路径建待验证规律 [%s]", scope)
+                    else:
+                        log.debug("B 路径跳过：%s", why)
+            except Exception as exc:
+                log.warning("B 路径建规律失败（跳过）：%s", exc)
+            # V0.5 Goal：用户明确表达目标 → 建 proposed（确认后才 active）
+            try:
+                if is_goal_declaration(message):
+                    title = extract_goal_title(message)
+                    goal, why = self.goal.propose(title, message)
+                    if goal is not None:
+                        log.info("Goal 待确认：%s", title[:40])
+                    else:
+                        log.debug("Goal 跳过：%s", why)
+            except Exception as exc:
+                log.warning("Goal 提议失败（跳过）：%s", exc)
+            # 本轮刚问出的问题，若目标在本轮写路径中已解决
+            # （如沉淀纠正联动否决了它），收回挂起：下轮不再误判，
+            # 元数据同步置空（回答正文已发出，历史保留原文）。
+            if verification_out is not None:
+                try:
+                    verification_out = self._retract_if_resolved(
+                        verification_out)
+                except Exception as exc:
+                    log.warning("挂起复核失败（保留原样）：%s", exc)
             self.chat_store.append(sid, "user", message)
             self.chat_store.append(sid, "assistant", answer)
 
@@ -293,6 +475,7 @@ class ConversationService:
             duration_s=time.perf_counter() - started,
             hypotheses_used=[h.to_public_dict() for h in hyps],
             verification_question=verification_out,
+            patterns_used=[p.to_public_dict() for p in pats],
         )
         log.info(
             "对话完成 session=%s 判断=%s 沉淀=%s 耗时=%.1fs%s",

@@ -43,6 +43,7 @@ class VerificationQuestion:
     text: str
     confidence: float
     reason: str
+    kind: str = "hypothesis"  # hypothesis | pattern | goal
 
     def to_dict(self) -> dict:
         return {
@@ -50,6 +51,7 @@ class VerificationQuestion:
             "text": self.text,
             "confidence": round(self.confidence, 2),
             "reason": self.reason,
+            "kind": self.kind,
         }
 
 
@@ -188,3 +190,187 @@ def resolve_pending_answer(
     except Exception as exc:
         log.warning("验证回答落链失败（跳过）：%s", exc)
         return None
+
+
+# ---------- Pattern 验证（V0.5：同一套规则，另一张表）----------
+def select_pattern_candidate(
+    pat_store,
+    message: str,
+    *,
+    paused: bool,
+    now: float | None = None,
+):
+    """tentative 规律同规则选人（band/独立源/冷却/次数/话题）。"""
+    if paused:
+        return None
+    if pat_store.get_pending() is not None:
+        return None
+    now = time.time() if now is None else now
+    for h in pat_store.list_patterns(live_only=True, limit=200):
+        if h.status != "tentative":
+            continue
+        if not (CONFIRM_BAND[0] <= h.confidence < CONFIRM_BAND[1]):
+            continue
+        try:
+            indep = pat_store.independent_support_count(h.id)
+        except Exception as exc:
+            log.warning("独立源计数失败，跳过该规律：%s", exc)
+            continue
+        if indep >= 2:
+            continue
+        if h.asked_count >= MAX_ASKS:
+            continue
+        if now - (h.last_asked_epoch or 0) <= ASK_COOLDOWN_S:
+            continue
+        if not is_related(message or "", h.scope):
+            continue
+        text, reason = build_question(h)  # 鸭子类型：Pattern 属性齐备
+        return h, VerificationQuestion(
+            hypothesis_id=h.id, text=text,
+            confidence=h.confidence, reason=reason, kind="pattern")
+    return None
+
+
+def resolve_pattern_answer(pat_store, message: str) -> dict | None:
+    """分类用户对挂起规律问题的回答并落链。"""
+    try:
+        pending = pat_store.get_pending()
+    except Exception as exc:
+        log.warning("读取挂起规律问题失败：%s", exc)
+        return None
+    if pending is None:
+        return None
+    try:
+        if is_denial(message or ""):
+            pat_store.reject(pending.id, (message or "")[:200],
+                             channel="verification")
+            h = pat_store.get(pending.id)
+            return {"hypothesis_id": pending.id, "verdict": "deny",
+                    "confidence": round(h.confidence, 2) if h else 0.25,
+                    "kind": "pattern"}
+        if is_confirmation(message or ""):
+            if not pat_store.record_verification_confirm(
+                    pending.id, message or ""):
+                return None
+            h = pat_store.get(pending.id)
+            return {"hypothesis_id": pending.id, "verdict": "confirm",
+                    "confidence": round(h.confidence, 2) if h else 0.6,
+                    "kind": "pattern"}
+        pat_store.note_evasive(pending.id)
+        return {"hypothesis_id": pending.id, "verdict": "evade",
+                "confidence": round(pending.confidence, 2),
+                "kind": "pattern"}
+    except Exception as exc:
+        log.warning("规律验证回答落链失败（跳过）：%s", exc)
+        return None
+
+
+# ---------- Goal 确认（V0.5：只收用户原话，只做关联）----------
+GOAL_MARKERS = ("我的目标是", "我想成为", "我想考上", "我要考上", "长期目标")
+
+
+def is_goal_declaration(message: str) -> bool:
+    return any(m in (message or "") for m in GOAL_MARKERS)
+
+
+def extract_goal_title(message: str) -> str:
+    """标题 = 首个标记之后的内容（<=60 字）；兜底整句截断。确定性。"""
+    text = (message or "").strip()
+    first = None
+    for m in GOAL_MARKERS:
+        i = text.find(m)
+        if i >= 0 and (first is None or i < first[0]):
+            first = (i, m)
+    if first is not None:
+        title = text[first[0] + len(first[1]):].strip(" ,.，。！？、:：")
+        if title:
+            return title[:60]
+    return text[:60]
+
+
+def build_goal_question(goal) -> tuple[str, str]:
+    show = goal.title if len(goal.title) <= 20 else goal.title[:20] + "…"
+    text = (f"要把「{show}」记为你的长期目标吗？"
+            f"之后我会帮你关联相关的规律和进展，对吗？")
+    if len(text) > MAX_QUESTION_CHARS:
+        text = text[:MAX_QUESTION_CHARS - 4] + "…对吗？"
+    reason = "你明确表达了目标，需你确认才记入（AI 不推测目标）"
+    return text, reason
+
+
+def select_goal_candidate(
+    goal_store,
+    message: str,
+    *,
+    paused: bool,
+    now: float | None = None,
+):
+    """proposed 目标：话题相关（标题关键词或目标标记）才问。"""
+    if paused:
+        return None
+    if goal_store.get_pending() is not None:
+        return None
+    now = time.time() if now is None else now
+    from core.context import extract_keywords
+    for g in goal_store.list_goals(live_only=True, limit=200):
+        if g.status != "proposed":
+            continue
+        keys = {k for k in extract_keywords(g.title) if len(k) >= 2}
+        related = (is_goal_declaration(message or "")
+                   or any(k in (message or "") for k in keys))
+        if not related:
+            continue
+        if g.asked_count >= MAX_ASKS:
+            continue
+        if now - (g.last_asked_epoch or 0) <= ASK_COOLDOWN_S:
+            continue
+        text, reason = build_goal_question(g)
+        return g, VerificationQuestion(
+            hypothesis_id=g.id, text=text, confidence=1.0,
+            reason=reason, kind="goal")
+    return None
+
+
+def resolve_goal_answer(goal_store, message: str) -> dict | None:
+    """分类用户对挂起目标问题的回答。确认→active；否决→rejected；回避→留挂起。"""
+    try:
+        pending = goal_store.get_pending()
+    except Exception as exc:
+        log.warning("读取挂起目标问题失败：%s", exc)
+        return None
+    if pending is None:
+        return None
+    try:
+        if is_denial(message or ""):
+            goal_store.reject(pending.id, (message or "")[:200])
+            return {"hypothesis_id": pending.id, "verdict": "deny",
+                    "confidence": 1.0, "kind": "goal"}
+        if is_confirmation(message or ""):
+            if not goal_store.confirm(pending.id):
+                return None
+            return {"hypothesis_id": pending.id, "verdict": "confirm",
+                    "confidence": 1.0, "kind": "goal"}
+        goal_store.note_evasive(pending.id)
+        return {"hypothesis_id": pending.id, "verdict": "evade",
+                "confidence": 1.0, "kind": "goal"}
+    except Exception as exc:
+        log.warning("目标回答落链失败（跳过）：%s", exc)
+        return None
+
+
+# ---------- Pattern 用户表达检测（V0.5 B 路径入口）----------
+# 用户明确说出规律性陈述时的标记（子串匹配，保守；命中只建 tentative）。
+PATTERN_MARKERS = ("我发现我", "我总是", "每次都", "固定模式", "我的习惯是")
+
+
+def is_pattern_declaration(message: str) -> bool:
+    return any(m in (message or "") for m in PATTERN_MARKERS)
+
+
+def pattern_scope_for(message: str) -> str:
+    """B 路径 scope：首个有效关键词，无则 自述（确定性）。"""
+    from core.context import extract_keywords
+    for k in extract_keywords(message or ""):
+        if len(k) >= 2:
+            return f"user:{k}"
+    return "user:自述"
