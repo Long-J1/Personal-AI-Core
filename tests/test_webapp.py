@@ -344,3 +344,70 @@ def test_status_model_service_ms_present(client):
     assert "model_service_ms" in s
     assert s["model_service_ms"] is None or isinstance(
         s["model_service_ms"], int)
+
+
+# ---------- V0.5 API：patterns / goals / reflection ----------
+
+def _v05_stores(client):
+    from memory.goal_store import GoalStore
+    from memory.pattern_store import PatternStore
+
+    c, store, _ = client
+    return c, PatternStore(store.db_path), GoalStore(store.db_path)
+
+
+def test_patterns_crud_api(client):
+    c, pat, _ = _v05_stores(client)
+    p, _ = pat.create("长期规律", "scope:x", source="promotion")
+    body = c.get("/api/patterns").json()
+    assert body["total"] == 1
+    assert body["items"][0]["status"] == "tentative"
+    d = c.get(f"/api/patterns/{p.id}").json()
+    assert d["ok"] and d["pattern"]["id"] == p.id
+    assert c.post(f"/api/patterns/{p.id}/confirm").json() == {"ok": True}
+    assert pat.get(p.id).status == "confirmed"
+    assert c.delete(f"/api/patterns/{p.id}").json()["ok"] is True
+    assert c.post(f"/api/patterns/{p.id}/restore").json()["ok"] is True
+    assert pat.get(p.id).status == "tentative"
+    assert c.post(f"/api/patterns/{p.id}/reject",
+                  json={"reason": "不对"}).json() == {"ok": True}
+    assert pat.get(p.id).status == "rejected"
+    assert c.get("/api/patterns/" + "0" * 32).status_code == 404
+
+
+def test_goals_crud_api(client):
+    c, _, goal = _v05_stores(client)
+    g, _ = goal.propose("每天跑步", "我想成为每天跑步的人")
+    body = c.get("/api/goals").json()
+    assert body["total"] == 1
+    assert body["items"][0]["status"] == "proposed"
+    d = c.get(f"/api/goals/{g.id}").json()
+    assert d["ok"] and d["goal"]["linked_pattern_ids"] == []
+    assert c.post(f"/api/goals/{g.id}/confirm").json() == {"ok": True}
+    assert goal.get(g.id).status == "active"
+    assert c.post(f"/api/goals/{g.id}/pause").json() == {"ok": True}
+    assert c.post(f"/api/goals/{g.id}/confirm").json() == {"ok": True}
+    assert c.post(f"/api/goals/{g.id}/done").json() == {"ok": True}
+    assert goal.get(g.id).status == "done"
+    assert c.get("/api/goals/" + "0" * 32).status_code == 404
+
+
+def test_reflection_api_and_ui(client):
+    c, _, _ = client
+    body = c.get("/api/reflection/weekly").json()
+    assert body["ok"] is True
+    assert set(body) >= {"lines", "question", "stats"}
+    assert len(body["lines"]) == 3
+    html = c.get("/").text
+    assert "过去7天" in html and "weeklyList" in html and "loadWeekly" in html
+
+
+def test_clear_memories_clears_patterns_keeps_goals(client):
+    """清空连带规律（派生理解），保留目标（用户原话，语义同 Context）。"""
+    c, pat, goal = _v05_stores(client)
+    p, _ = pat.create("长期规律", "scope:x", source="promotion")
+    g, _ = goal.propose("每天跑步", "我想成为每天跑步的人")
+    r = c.delete("/api/memories").json()
+    assert r["ok"] is True
+    assert pat.count_live() == 0
+    assert goal.get(g.id).status == "proposed"

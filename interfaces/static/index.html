@@ -231,6 +231,16 @@
     <div id="memEmpty" class="hint" hidden>还没有记忆。去 ① 里拍一张或传一张图试试。</div>
   </section>
 
+  <!-- ⑤′ 过去7天（V0.5 Reflection：只读 digest，无按钮无交互） -->
+  <section class="card" id="weeklyCard" hidden>
+    <h2>📊 过去7天 <small>它整理好的理解，不是打扰——数字都可从数据推导</small></h2>
+    <div class="row tools">
+      <button id="btnWeeklyRefresh">↻ 刷新</button>
+    </div>
+    <ul id="weeklyList" class="memlist"></ul>
+    <div id="weeklyQ" class="hint" hidden></div>
+  </section>
+
   <!-- ⑥ 模型设置（D009：模型可换，它对你的理解不换） -->
   <section class="card">
     <h2>⑥ 模型设置 <small>换模型不换"它"——Personal Context 与模型无关</small></h2>
@@ -642,6 +652,23 @@ async function loadHypos() {
 
 $('btnHypoRefresh').addEventListener('click', loadHypos);
 
+/* ---------- 过去7天（V0.5 只读 digest） ---------- */
+async function loadWeekly() {
+  try {
+    const r = await api('/api/reflection/weekly');
+    const lines = (r && r.lines) || [];
+    if (!lines.length) return;
+    $('weeklyCard').hidden = false;
+    $('weeklyList').innerHTML = lines.map(t =>
+      `<li class="mem"><span class="desc">${esc(t)}</span></li>`).join('');
+    const q = $('weeklyQ');
+    if (r.question) { q.textContent = r.question; q.hidden = false; }
+    else { q.hidden = true; }
+  } catch (e) { /* 静默：digest 失败不影响其他区块 */ }
+}
+
+$('btnWeeklyRefresh').addEventListener('click', loadWeekly);
+
 /* ---------- 记忆库 ---------- */
 async function loadMemories() {
   try {
@@ -792,7 +819,7 @@ async function loadDataInfo() {
         try {
           const r2 = await api('/api/data/restore', { method: 'POST', body: JSON.stringify({ name: btn.dataset.restore }) });
           dataHint(`已恢复（安全网：${r2.safety_backup || '无'}）· 理解 ${r2.counts?.context_entries ?? '?'} 条 · 记忆 ${r2.counts?.events ?? '?'} 条`, false);
-          loadStatus(); loadMemories(); loadContext(); loadHypos(); loadChatHistory(); loadModelSettings(); loadDataInfo();
+          loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadChatHistory(); loadModelSettings(); loadDataInfo();
         } catch (e) {
           dataHint(e.message, true);
         } finally { busy(btn, false); }
@@ -827,7 +854,7 @@ $('dataImport').addEventListener('change', async (ev) => {
     const r = await res.json().catch(() => null);
     if (!res.ok || !r?.ok) throw new Error(r?.error || ('导入失败（HTTP ' + res.status + '）'));
     dataHint(`导入成功 · 理解 ${r.counts?.context_entries ?? '?'} 条 · 记忆 ${r.counts?.events ?? '?'} 条`, false);
-    loadStatus(); loadMemories(); loadContext(); loadHypos(); loadChatHistory(); loadModelSettings(); loadDataInfo();
+    loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadChatHistory(); loadModelSettings(); loadDataInfo();
   } catch (e) {
     dataHint(e.message, true);
   }
@@ -836,7 +863,7 @@ $('dataImport').addEventListener('change', async (ev) => {
 $('btnDataRefresh').addEventListener('click', loadDataInfo);
 
 /* ---------- 初始化 ---------- */
-loadStatus(); loadMemories(); loadContext(); loadHypos(); loadChatHistory(); loadModelSettings(); loadDataInfo();
+loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadChatHistory(); loadModelSettings(); loadDataInfo();
 setInterval(loadStatus, 15000);
 </script>
 </body>

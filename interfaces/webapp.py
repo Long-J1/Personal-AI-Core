@@ -23,9 +23,12 @@ from core.context import Recaller
 from core.conversation import ConversationService
 from core.data_manager import DataManager, DataError
 from core.pipeline import CorePipeline
+from core.reflection import build_weekly_digest
 from memory.chat_store import ChatStore
 from memory.context_store import ContextStore
 from memory.hypothesis_store import HypothesisStore
+from memory.goal_store import GoalStore
+from memory.pattern_store import PatternStore
 from memory.store import MemoryStore
 from models.base import BaseModelAdapter, ModelError
 from models.factory import ModelRegistry, build_model
@@ -108,6 +111,8 @@ def create_app(
     context_store: ContextStore | None = None,
     chat_store: ChatStore | None = None,
     hypothesis_store: HypothesisStore | None = None,
+    pattern_store: PatternStore | None = None,
+    goal_store: GoalStore | None = None,
 ) -> FastAPI:
     ensure_dirs()
     store = store or MemoryStore(DB_PATH)
@@ -120,12 +125,24 @@ def create_app(
     chat_store = chat_store or ChatStore(store.db_path)
     # V0.3：假设与记忆同库（零配置）；测试可注入独立实例
     hypothesis_store = hypothesis_store or HypothesisStore(store.db_path)
+    # V0.5：规律与目标默认同库；测试可注入独立实例
+    pattern_store = pattern_store or PatternStore(store.db_path)
+    goal_store = goal_store or GoalStore(store.db_path)
     pipeline = CorePipeline(store, model)
     recaller = Recaller(store, model)
     conversation = ConversationService(
         store, context_store, model, chat_store=chat_store,
         hypothesis_store=hypothesis_store,
+        pattern_store=pattern_store,
+        goal_store=goal_store,
     )
+
+    def _safe_clear(pat_store) -> int:
+        try:
+            return pat_store.clear_all()
+        except Exception as exc:
+            log.warning("清空规律失败：%s", exc)
+            return 0
 
     def _safe_hyp_count() -> int | None:
         """假设计数失败不许掀翻健康探针（status 是壳子的体温计）。"""
@@ -460,6 +477,97 @@ def create_app(
         found = hypothesis_store.restore_entry(hypo_id)
         return {"ok": found, "found": found}
 
+    # ---------- 规律管理（V0.5：只有 confirmed 进 prompt）----------
+    @app.get("/api/patterns")
+    def list_patterns() -> dict:
+        items = pattern_store.list_patterns()
+        return {
+            "total": len(items),
+            "items": [h.to_public_dict() for h in items],
+        }
+
+    @app.get("/api/patterns/{pattern_id}")
+    def get_pattern(pattern_id: str) -> dict:
+        detail = pattern_store.get_detail(pattern_id)
+        if detail is None:
+            return JSONResponse({"ok": False, "error": "规律不存在"},
+                                status_code=404)
+        return {"ok": True, "pattern": detail}
+
+    @app.post("/api/patterns/{pattern_id}/confirm")
+    def confirm_pattern(pattern_id: str) -> dict:
+        return {"ok": pattern_store.confirm(pattern_id)}
+
+    @app.post("/api/patterns/{pattern_id}/reject")
+    def reject_pattern(pattern_id: str, req: HypothesisRejectRequest) -> dict:
+        return {"ok": pattern_store.reject(pattern_id, req.reason,
+                                           channel="trust_ui")}
+
+    @app.delete("/api/patterns/{pattern_id}")
+    def delete_pattern(pattern_id: str) -> dict:
+        found = pattern_store.delete_entry(pattern_id)
+        return {"ok": found, "found": found}
+
+    @app.post("/api/patterns/{pattern_id}/restore")
+    def restore_pattern(pattern_id: str) -> dict:
+        found = pattern_store.restore_entry(pattern_id)
+        return {"ok": found, "found": found}
+
+    # ---------- 目标管理（V0.5：只收用户原话，只做关联）----------
+    @app.get("/api/goals")
+    def list_goals() -> dict:
+        items = goal_store.list_goals()
+        return {
+            "total": len(items),
+            "items": [g.to_public_dict() for g in items],
+        }
+
+    @app.get("/api/goals/{goal_id}")
+    def get_goal(goal_id: str) -> dict:
+        detail = goal_store.get_detail(goal_id, pattern_store, context_store)
+        if detail is None:
+            return JSONResponse({"ok": False, "error": "目标不存在"},
+                                status_code=404)
+        return {"ok": True, "goal": detail}
+
+    @app.post("/api/goals/{goal_id}/confirm")
+    def confirm_goal(goal_id: str) -> dict:
+        return {"ok": goal_store.confirm(goal_id)}
+
+    @app.post("/api/goals/{goal_id}/reject")
+    def reject_goal(goal_id: str, req: HypothesisRejectRequest) -> dict:
+        return {"ok": goal_store.reject(goal_id, req.reason)}
+
+    @app.delete("/api/goals/{goal_id}")
+    def delete_goal(goal_id: str) -> dict:
+        found = goal_store.delete_entry(goal_id)
+        return {"ok": found, "found": found}
+
+    @app.post("/api/goals/{goal_id}/restore")
+    def restore_goal(goal_id: str) -> dict:
+        found = goal_store.restore_entry(goal_id)
+        return {"ok": found, "found": found}
+
+    @app.post("/api/goals/{goal_id}/done")
+    def done_goal(goal_id: str) -> dict:
+        return {"ok": goal_store.complete(goal_id)}
+
+    @app.post("/api/goals/{goal_id}/pause")
+    def pause_goal(goal_id: str) -> dict:
+        return {"ok": goal_store.pause(goal_id)}
+
+    # ---------- 周报 Reflection（V0.5：只读 digest，失败静默）----------
+    @app.get("/api/reflection/weekly")
+    def weekly_reflection() -> dict:
+        try:
+            digest = build_weekly_digest(store, context_store,
+                                         hypothesis_store, pattern_store,
+                                         goal_store)
+        except Exception as exc:
+            log.warning("周报生成失败（返回空 digest）：%s", exc)
+            digest = {"lines": [], "question": "", "stats": {}}
+        return {"ok": True, **digest}
+
     # ---------- 记忆管理（查看/删除/导出/暂停）----------
     @app.get("/api/memories")
     def list_memories(
@@ -494,7 +602,8 @@ def create_app(
             log.warning("清空假设失败：%s", exc)
             hypo_deleted = 0
         return {"ok": True, "deleted": deleted,
-                "hypotheses_deleted": hypo_deleted}
+                "hypotheses_deleted": hypo_deleted,
+                "patterns_deleted": _safe_clear(pattern_store)}
 
     @app.get("/api/memories/export")
     def export_memories() -> JSONResponse:
