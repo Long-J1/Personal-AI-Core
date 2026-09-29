@@ -192,8 +192,22 @@ class ContextStore:
         return {text[i:i + 2] for i in range(len(text) - 1)} if len(text) >= 2 else set()
 
     @staticmethod
+    def _numeric_seq(text: str) -> list[str]:
+        """数字序列（含中文数字）：1号 vs 2号、三天 vs 五天必须能区分。"""
+        import re
+        return re.findall(r"[0-9一二三四五六七八九十百千万]+", text or "")
+
+    @staticmethod
     def _similarity(a: str, b: str) -> float:
-        """二连字 Jaccard：确定、可测、无模型（换说法能并到一起）。"""
+        """二连字 Jaccard：确定、可测、无模型（换说法能并到一起）。
+
+        数字守卫：数字序列不同直接判 0（"喜欢喝1号/2号"、"提前三天/五天"
+        是不同事实，不是复述，绝不能合并）。
+        """
+        na, nb = (ContextStore._numeric_seq(a),
+                  ContextStore._numeric_seq(b))
+        if na != nb and (na or nb):
+            return 0.0
         sa, sb = ContextStore._bigrams(a), ContextStore._bigrams(b)
         if not sa or not sb:
             return 0.0

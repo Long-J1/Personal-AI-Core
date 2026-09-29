@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from memory.hypothesis_store import _is_explicit_denial
 from memory.context_store import (
     KINDS,
     KIND_WEEKLY_CAP,
@@ -24,6 +25,7 @@ from memory.store import MemoryStore
 from models.base import BaseModelAdapter, ModelError
 
 from .config import Settings, settings as default_settings
+from .context import extract_keywords
 from .understanding import extract_json, repair_truncated_json
 
 log = logging.getLogger("core.deposit")
@@ -46,6 +48,57 @@ DEPOSIT_SYSTEM = (
     "5. 单轮 new 最多 3 条，每条 content 不超过 100 字。\n"
     "6. event 仅当用户报告了一件真实发生的事（可作为事件记忆）时给出，否则为 null。"
 )
+
+# ---------- V0.5.1 可靠性：规则兜底（不依赖模型输出）----------
+# 疑问标记：出现即可能是提问；必须同时"无依据"才拦截新建
+# （有依据的提问如"你觉得我最近状态怎么样"照常沉淀）。
+QUESTION_MARKERS = ("?", "？", "吗", "呢", "么", "谁", "什么", "怎么",
+                    "怎样", "如何", "哪", "几", "多少", "是不是", "对不对",
+                    "好不好", "能否", "是否")
+
+
+def _keywords(text: str) -> set[str]:
+    """整词关键词（无依据门用：严格，防单字巧合蒙混过关）。"""
+    return {k for k in extract_keywords(text or "") if len(k) >= 2}
+
+
+def _match_grams(text: str) -> set[str]:
+    """关键词 + 其二连字展开（兜底关联用）。
+
+    整串匹配太严（"效率很高"对不上"效率高"），二连字保证召回；
+    调用方用数量阈值防单字巧合误伤。
+    """
+    out: set[str] = set()
+    for k in extract_keywords(text or ""):
+        if len(k) < 2:
+            continue
+        out.add(k)
+        out.update(k[i:i + 2] for i in range(len(k) - 1))
+    return out
+
+
+def _is_ungrounded_question(user_text: str, entries,
+                            store) -> bool:
+    """无依据提问：是问句，且与现有理解/近期事件零关键词交集。
+
+    此时用户没教给系统任何新东西（如"弟弟叫什么"），只会产生
+    "正在询问X"这类噪音理解——拦截新建，但纠正通道照常。
+    """
+    if not any(m in (user_text or "") for m in QUESTION_MARKERS):
+        return False
+    msg_kws = _keywords(user_text)
+    corpus = [e.content for e in (entries or [])]
+    if store is not None:
+        try:
+            corpus.extend(
+                e.description for e in store.list_events(limit=20))
+        except Exception:
+            pass
+    for text in corpus:
+        if msg_kws & _keywords(text):
+            return False
+    return True
+
 
 @dataclass
 class DepositResult:
@@ -109,8 +162,18 @@ class Depositor:
         answer: str,
         entries: list[ContextEntry],
     ) -> DepositResult:
-        """提取 + 应用。失败返回带 error 的结果，绝不抛异常打断对话。"""
+        """提取 + 应用。失败返回带 error 的结果，绝不抛异常打断对话。
+
+        可靠性顺序：纠正永远先行（模型/规则任一通道）；新建理解与事件
+        只在"有依据"时进行（无依据提问只读不写）；显式否决走规则兜底，
+        不依赖模型 JSON 是否合法。
+        """
         result = DepositResult()
+        grounded = not _is_ungrounded_question(
+            user_text, entries, self.store)
+        if not grounded:
+            log.info("无依据提问，本轮只处理纠正、不新建理解/事件：%s",
+                     (user_text or "")[:40])
         try:
             raw = self.model.chat(
                 [
@@ -124,6 +187,7 @@ class Depositor:
         except ModelError as exc:
             result.error = f"沉淀的模型调用失败：{exc}"
             log.warning(result.error)
+            self._fallback_denial(user_text, answer, entries, result)
             return result
 
         data = extract_json(raw or "")
@@ -135,13 +199,56 @@ class Depositor:
         if data is None:
             result.error = "沉淀输出不是有效 JSON（本轮跳过）"
             log.warning("%s：%s", result.error, (raw or "")[:80])
+            self._fallback_denial(user_text, answer, entries, result)
             return result
 
         alias_map = {f"#{i}": e for i, e in enumerate(entries, start=1)}
         self._apply_corrections(data, alias_map, result, user_text)
-        self._apply_creates(data, result)
-        self._apply_event(data, result)
+        if grounded:
+            self._apply_creates(data, result)
+            self._apply_event(data, result)
+        self._fallback_denial(user_text, answer, entries, result)
         return result
+
+    def _fallback_denial(self, user_text: str, answer: str,
+                         entries, result: DepositResult) -> None:
+        """规则兜底纠正：显式否决 + 本轮无纠正生效 → 按关键词直连反证。
+
+        不依赖模型 JSON（解析失败/模型没提取时仍能工作）；
+        已有纠正生效时不重复处罚。候选条目限定为本轮进入 prompt 的理解，
+        关联文本 = 用户原话 + 本轮回答（回答复述了依据时能对上"这样"类指代）。
+        """
+        if result.corrected or self.hyp is None:
+            return
+        if not _is_explicit_denial(user_text or ""):
+            return
+        pool_kws = _match_grams(
+            str(user_text or "") + "\n" + str(answer or ""))
+        if not pool_kws:
+            log.warning("显式否决但无关键词可关联（跳过兜底）：%s",
+                        (user_text or "")[:40])
+            return
+        hit_any = False
+        for e in entries or []:
+            entry_kws = _match_grams(e.content)
+            shared = pool_kws & entry_kws
+            # 阈值 2 个二连字（单字巧合如"是我"不够）；超短条目按自身放宽
+            need = min(2, len(entry_kws)) if entry_kws else 2
+            if len(shared) < need:
+                continue
+            try:
+                hits = self.hyp.record_correction_hit(
+                    e.id, user_text, "规则兜底：显式否决")
+            except Exception as exc:
+                log.warning("兜底联动失败（%s）：%s", e.id[:8], exc)
+                continue
+            if hits:
+                hit_any = True
+                log.info("规则兜底纠正命中假设：%s",
+                         [h[:8] for h in hits])
+        if not hit_any:
+            log.warning("显式否决但本轮理解均无关联（跳过兜底）：%s",
+                        (user_text or "")[:40])
 
     # ---------- 应用：先纠正，后新增 ----------
     def _apply_corrections(
