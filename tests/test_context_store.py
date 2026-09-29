@@ -92,3 +92,48 @@ def test_export_includes_entries_and_history(context_store: ContextStore):
     assert data["counts"] == {"entries": 1, "active": 0, "changes": 2}
     assert data["entries"][0]["content"] == "喜欢猫"
     assert {h["action"] for h in data["history"]} == {"create", "delete"}
+
+
+# ---------- P1：相似合并与配额回归 ----------
+
+def test_add_or_merge_paraphrase(context_store):
+    e, _ = context_store.add_entry("interaction", "考试前一天提醒我",
+                                   source="chat")
+    got, skip = context_store.add_or_merge("interaction", "考试前一天提醒我哦")
+    assert got is None and (skip or "").startswith("merged:")
+    assert context_store.count_active() == 1  # 没新建
+    assert context_store.get_entry(e.id).used_count == 1  # 被强化一次
+    acts = [h["action"] for h in context_store.history()]
+    assert "merge" in acts  # 合并走变更日志
+
+
+def test_add_or_merge_dissimilar_creates(context_store):
+    context_store.add_entry("interaction", "考试前一天提醒我", source="chat")
+    got, skip = context_store.add_or_merge("interaction", "喜欢吃香菜")
+    assert got is not None and skip is None
+    assert context_store.count_active() == 2
+
+
+def test_add_or_merge_exact_dup(context_store):
+    context_store.add_entry("fact", "用户不吃香菜", source="chat")
+    got, skip = context_store.add_or_merge("fact", "用户不吃香菜")
+    assert got is None and skip == "已存在相同理解"
+
+
+def test_quota_merge_only(context_store):
+    """同 kind 7 天新增打满 → 陌生内容也不新建，相似的仍可合并。"""
+    from core.deposit import Depositor, DepositResult
+    from models.mock_adapter import MockChatModel
+    for i in range(10):
+        context_store.add_entry("fact", f"用户喜欢食物{i}号", source="chat")
+    dep = Depositor(context_store, None, MockChatModel())
+    res = DepositResult()
+    dep._apply_creates(
+        {"new": [{"kind": "fact", "content": "今天天气完全无关配额测试"}]},
+        res)
+    assert res.created == []  # 配额打满：不新建
+    dep._apply_creates(
+        {"new": [{"kind": "fact", "content": "用户喜欢食物1号啊"}]},
+        res)
+    assert res.created == []  # 合并也不进 created
+    assert context_store.count_active() == 10  # 总量有上界

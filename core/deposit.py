@@ -12,7 +12,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-from memory.context_store import KINDS, ContextEntry, ContextStore
+from memory.context_store import (
+    KINDS,
+    KIND_WEEKLY_CAP,
+    RECENT_DAYS,
+    ContextEntry,
+    ContextStore,
+)
 from memory.event import Event
 from memory.store import MemoryStore
 from models.base import BaseModelAdapter, ModelError
@@ -202,11 +208,15 @@ class Depositor:
             content = str(item.get("content") or "").strip()
             if kind not in KINDS:
                 continue
-            entry, skip = self.ctx.add_entry(
+            # P1：同 kind 近期新增打满配额 → 只合并模式（绝不新建）
+            throttled = self.ctx.count_recent_by_kind(
+                kind, days=RECENT_DAYS) >= KIND_WEEKLY_CAP
+            entry, skip = self.ctx.add_or_merge(
                 kind,
                 content,
                 source="chat",
                 max_chars=self.settings.deposit_max_chars,
+                merge_only=throttled,
             )
             if entry is None:
                 log.debug("新增跳过：%s", skip)

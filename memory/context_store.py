@@ -32,6 +32,11 @@ KIND_LABELS = {
 }
 SOURCES = ("chat", "observe", "correction", "manual", "system")
 
+# ---------- P1 沉淀卫生（常量，单测锁定）----------
+SIM_MERGE_THRESHOLD = 0.6  # 二连字 Jaccard 相似度，达到即合并
+KIND_WEEKLY_CAP = 10       # 同 kind 7 天新增上限，超了只合并
+RECENT_DAYS = 7
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS context_entries (
   id TEXT PRIMARY KEY,
@@ -179,6 +184,108 @@ class ContextStore:
                 )
         log.info("理解新增 [%s] %s", KIND_LABELS.get(kind, kind), content[:60])
         return entry, None
+
+    # ---------- 相似合并（P1：长期运行不快速填满）----------
+    @staticmethod
+    def _bigrams(text: str) -> set[str]:
+        text = text or ""
+        return {text[i:i + 2] for i in range(len(text) - 1)} if len(text) >= 2 else set()
+
+    @staticmethod
+    def _similarity(a: str, b: str) -> float:
+        """二连字 Jaccard：确定、可测、无模型（换说法能并到一起）。"""
+        sa, sb = ContextStore._bigrams(a), ContextStore._bigrams(b)
+        if not sa or not sb:
+            return 0.0
+        return len(sa & sb) / len(sa | sb)
+
+    def count_recent_by_kind(self, kind: str, days: int = 7) -> int:
+        """近 N 天新增的同 kind 活跃条目数（配额用）。"""
+        since = _now().timestamp() - days * 86400
+        with closing(self._connect()) as con:
+            return int(con.execute(
+                "SELECT COUNT(*) FROM context_entries WHERE active=1"
+                " AND kind=? AND created_at_epoch >= ?",
+                (kind, since),
+            ).fetchone()[0])
+
+    def add_or_merge(
+        self,
+        kind: str,
+        content: str,
+        source: str = "chat",
+        *,
+        detail: dict | None = None,
+        max_chars: int = 200,
+        merge_only: bool = False,
+    ) -> tuple[ContextEntry | None, str | None]:
+        """新增；已有相似条目则合并（used+1 + 变更日志），不新建。
+
+        返回 (entry, None) / (None, 跳过原因）。合并返回 (None, "merged:<id>")：
+        调用方按"跳过"处理（不占新增配额、不进 created），但理解被强化了一次。
+        merge_only=True 时绝不新建（配额打满后的只合并模式）。
+        """
+        if kind not in KINDS:
+            return None, f"未知类型 {kind}"
+        content = (content or "").strip()[:max_chars]
+        if not content:
+            return None, "内容为空"
+        now = _now()
+        with self._lock, closing(self._connect()) as con:
+            dup = con.execute(
+                "SELECT id FROM context_entries WHERE active=1 AND content = ?",
+                (content,),
+            ).fetchone()
+            if dup:
+                return None, "已存在相同理解"
+            rows = con.execute(
+                "SELECT id, content FROM context_entries"
+                " WHERE active=1 AND kind=?",
+                (kind,),
+            ).fetchall()
+            best_id, best_sim = None, 0.0
+            for r in rows:
+                sim = self._similarity(content, r["content"] or "")
+                if sim > best_sim:
+                    best_id, best_sim = r["id"], sim
+            if best_id is not None and best_sim >= SIM_MERGE_THRESHOLD:
+                with con:
+                    con.execute(
+                        "UPDATE context_entries SET used_count = used_count + 1,"
+                        " updated_at_iso=?, updated_at_epoch=? WHERE id=?",
+                        (now.isoformat(), now.timestamp(), best_id),
+                    )
+                    self._log(
+                        con, "merge", best_id, kind,
+                        content_before=None, content_after=None,
+                        detail={"merged_from": content,
+                                "similarity": round(best_sim, 2),
+                                **(detail or {})},
+                    )
+                log.info("理解合并 [%s] 相似度 %.2f → %s",
+                         KIND_LABELS.get(kind, kind), best_sim, best_id[:8])
+                return None, f"merged:{best_id}"
+            if merge_only:
+                return None, "配额已满且无相似条目可合并"
+            with con:
+                entry = ContextEntry(
+                    id=uuid.uuid4().hex, kind=kind, content=content,
+                    source=source, created_at=now, updated_at=now,
+                )
+                con.execute(
+                    "INSERT INTO context_entries "
+                    "(id, kind, content, source, created_at_iso, created_at_epoch, "
+                    " updated_at_iso, updated_at_epoch, active, used_count) "
+                    "VALUES (?,?,?,?,?,?,?,?,1,0)",
+                    (entry.id, kind, content, source, now.isoformat(),
+                     now.timestamp(), now.isoformat(), now.timestamp()),
+                )
+                self._log(
+                    con, "create", entry.id, kind,
+                    content_before=None, content_after=content, detail=detail,
+                )
+            log.info("理解新增 [%s] %s", KIND_LABELS.get(kind, kind), content[:60])
+            return entry, None
 
     def correct_entry(
         self,
