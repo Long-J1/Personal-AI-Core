@@ -42,7 +42,7 @@ def test_r1_creates_hypothesis(stores):
     assert len(r.created) == 1
     h = hyp.get(r.created[0])
     assert h.scope == "activity:写作业"
-    assert "写作业" in h.statement and "3次" in h.statement
+    assert "写作业" in h.statement and "3次" not in h.statement  # P2：无计数
     assert h.status == "tentative"
     assert h.support_count == 3
     # 3 个独立事件源 → 不 cap：0.50 + 3×0.08 = 0.74
@@ -97,8 +97,8 @@ def test_r2_creates_hypothesis(stores):
     assert r.checked_interactions == 3
     assert len(r.created) == 1
     h = hyp.get(r.created[0])
-    assert h.scope == "interaction:提醒"
-    assert "提醒" in h.statement and "2条" in h.statement
+    assert h.scope == "interaction:提醒我"  # P0：最长公共子串标签
+    assert "提醒" in h.statement and "2条" not in h.statement  # P2：无计数
     assert h.support_count == 2
     # 同日两条 → 1 个独立源：0.50 + 0.16 = 0.66（未触 cap）
     assert h.confidence == pytest.approx(0.66)
@@ -173,3 +173,52 @@ def test_induced_then_contradicted(stores):
     assert h.status == "tentative"  # 软反证不变状态
     assert hyp.reject(h.id, reason="不需要")
     assert hyp.get(h.id).confidence == pytest.approx(0.25)
+
+
+# ---------- P0：主题分裂回归（审计 D1） ----------
+
+def test_p0_mixed_themes_split(stores):
+    """审计同款混杂数据（提醒/三天/简短）必须长出 >=2 个假设。"""
+    from core.inducer import STOP_GRAMS
+    mem, ctx, hyp = stores
+    for t in ("考试前一天提醒我", "重要事情提前提醒我",
+              "考试提前三天提醒我", "重要事情提前三天提醒我",
+              "回答简短些", "简短优先"):
+        _interaction(ctx, t)
+    r = Inducer(mem, ctx, hyp).induce_all()
+    assert len(r.created) >= 2, [h.scope for h in hyp.list_hypotheses()]
+    scopes = {h.scope for h in hyp.list_hypotheses()}
+    assert len(scopes) >= 2
+    # 主题词永不在停用表（否则整个主题隐形）
+    for w in ("提醒", "考试", "作业", "三天", "简短", "提前"):
+        assert w not in STOP_GRAMS, w
+
+
+def test_p0_single_theme_stays_one(stores):
+    """单主题数据仍只出 1 个（防分裂过度）。"""
+    mem, ctx, hyp = stores
+    _interaction(ctx, "考试前一天提醒我")
+    _interaction(ctx, "重要事情提前提醒我")
+    r = Inducer(mem, ctx, hyp).induce_all()
+    assert len(r.created) == 1
+
+
+def test_p0_label_deterministic(stores, tmp_path):
+    """同数据在两个独立库跑，scope 一致（排序确定性）。"""
+    from core.inducer import Inducer as I2
+    texts = ("考试提前三天提醒我", "重要事情提前三天提醒我")
+    mem, ctx, hyp = stores
+    for t in texts:
+        _interaction(ctx, t)
+    I2(mem, ctx, hyp).induce_all()
+    first = sorted(h.scope for h in hyp.list_hypotheses())
+    db2 = tmp_path / "ind2.db"
+    mem2 = MemoryStore(db2)
+    ctx2 = ContextStore(db2)
+    hyp2 = HypothesisStore(db2)
+    for t in texts:
+        e, _ = ctx2.add_entry("interaction", t, source="chat")
+        assert e is not None
+    I2(mem2, ctx2, hyp2).induce_all()
+    second = sorted(h.scope for h in hyp2.list_hypotheses())
+    assert first == second and len(first) == 1

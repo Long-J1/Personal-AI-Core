@@ -26,6 +26,26 @@ INTERACTION_THEME_MIN = 2    # R2：共享关键词的相处偏好条目几条�
 EVENT_SCAN_LIMIT = 200       # 每次扫描的事件上限
 MIN_KEYWORD_LEN = 2          # 归纳关键词最小长度
 
+# ---------- R2 主题分裂（P0：防高频词污染/巨组合并）----------
+# 停用二连字：只做分组和标签用，不碰原文。主题词（提醒/考试/作业/三天/简短…）
+# 绝不在此表——一旦主题词被停用，整个主题就隐形了（单测锁死几个代表）。
+STOP_GRAMS = frozenset({
+    "用户", "希望", "觉得", "认为", "知道", "看到", "听说",
+    "想让", "让我", "帮我", "给我", "告诉", "对我", "为我",
+    "喜欢", "讨厌", "AI",
+    "我", "你", "他", "她", "们",
+    "的", "了", "在", "和", "与", "对", "就", "是", "有", "要",
+    "会", "能", "可", "都", "也", "还", "再", "更", "很", "太",
+    "不", "没", "这", "那", "个", "种", "样", "么", "吗", "呢",
+    "啊", "吧", "把", "被", "让", "去", "来", "上", "下", "里",
+    "前", "后", "时", "事情", "东西", "问题", "方面", "保持", "一致",
+    "进行", "相关", "时候", "一下", "一点", "已经", "经常", "总是",
+    "不要",
+})
+LABEL_MAX_LEN = 8            # 主题标签最长字数（scope 可读性）
+GIANT_SPLIT_MIN = 6          # 超过此规模的组尝试二次切分
+HIGH_FREQ_RATIO = 0.5        # 出现在超半数条目里的 bigram 退出 label 候选
+
 
 @dataclass
 class InduceResult:
@@ -83,8 +103,9 @@ class Inducer:
             if len(members) < ACTIVITY_REPEAT_MIN:
                 continue
             scope = f"activity:{act}"
+            # P2：陈述不写具体计数（"3次"会随证据增长过期撒谎），计数只活在字段里
             statement = (
-                f"用户近期多次进行「{act}」相关活动（{len(members)}次），"
+                f"用户近期多次进行「{act}」相关活动，"
                 f"可能正处在相关事项的持续期。"
             )
             self._create_or_link(
@@ -98,7 +119,8 @@ class Inducer:
         entries = self.ctx.list_entries(kind="interaction")
         result.checked_interactions = len(entries)
         # 中文无空格：整串关键词精确匹配组不上，用二连字做主题键；
-        # 共享任一二连字的条目连通成组（小规模 O(n²)，确定性）。
+        # P0：停用词先剔除（"用户/希望/AI"这种高频词不再有资格连边），
+        # 否则真实数据下所有条目连成一个巨组，第二个主题永不诞生。
         keys: dict[str, set[str]] = {}
         for e in entries:
             grams: set[str] = set()
@@ -108,15 +130,19 @@ class Inducer:
                 elif len(kw) > MIN_KEYWORD_LEN:
                     grams.update(
                         kw[i:i + 2] for i in range(len(kw) - 1))
-            keys[e.id] = grams
+            keys[e.id] = {g for g in grams if g not in STOP_GRAMS}
         groups = self._connected_groups(entries, keys)
-        for members in groups:
+        # P0：巨组二次切分（去掉组内最高频 bigram 后还连通的部分各立门户）
+        split: list[list] = []
+        for g in groups:
+            split.extend(self._split_giant(g, keys))
+        for members in split:
             if len(members) < INTERACTION_THEME_MIN:
                 continue
             label = self._theme_label(members, keys)
             scope = f"interaction:{label}"
             statement = (
-                f"用户在「{label}」方面多次表达过相处偏好（{len(members)}条），"
+                f"用户在「{label}」方面多次表达过相处偏好，"
                 f"可能希望 AI 在此类场景保持一致。"
             )
             self._create_or_link(
@@ -153,15 +179,70 @@ class Inducer:
         return sorted(grouped, key=lambda g: g[0].id)
 
     @staticmethod
+    def _split_giant(members: list, keys: dict[str, set[str]]) -> list[list]:
+        """巨组二次切分：去掉组内最高频 bigram 后还连通的部分各立门户。
+
+        切不开（仍是一组）就原样返回；全确定性（频次→字典序）。
+        """
+        if len(members) <= GIANT_SPLIT_MIN:
+            return [members]
+        freq: dict[str, int] = {}
+        for m in members:
+            for g in keys[m.id]:
+                freq[g] = freq.get(g, 0) + 1
+        if not freq:
+            return [members]
+        top = sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+        keys2 = {m.id: (keys[m.id] - {top}) for m in members}
+        subs = Inducer._connected_groups(members, keys2)
+        return subs if len(subs) > 1 else [members]
+
+    @staticmethod
+    def _has_content_gram(cand: str) -> bool:
+        """候选串里至少含一个非停用二连字（纯胶水串不能当标签）。"""
+        return any(
+            cand[i:i + 2] not in STOP_GRAMS
+            for i in range(len(cand) - 1)
+        )
+
+    @staticmethod
     def _theme_label(members: list, keys: dict[str, set[str]]) -> str:
-        """组内最多条目共享的二连字；并列取字典序首个（确定性）。"""
+        """组内最长公共子串（含非停用词）；并列字典序首个；截断保可读。
+
+        比"出现最多的二连字"更精确："提前三天"不会输给"提醒"。
+        找不到（理论上极少）回退旧规则，保证总有标签。
+        """
+        contents = {m.id: m.content for m in members}
+        texts = [contents[m.id] for m in members]
+        base = texts[0]
+        best = ""
+        for i in range(len(base)):
+            for j in range(i + 2, min(len(base), i + 14) + 1):
+                cand = base[i:j]
+                if len(cand) < len(best):
+                    continue
+                if not all(cand in t for t in texts[1:]):
+                    continue
+                if not Inducer._has_content_gram(cand):
+                    continue
+                if len(cand) > len(best) or (
+                        len(cand) == len(best) and cand < best):
+                    best = cand
+        if best:
+            return best[:LABEL_MAX_LEN]
+        # 回退：组内最高频 bigram（高频>半数的不配当标签）
         from collections import Counter
         counter: Counter[str] = Counter()
         for m in members:
             for g in keys[m.id]:
                 counter[g] += 1
-        best = max(counter.values())
-        return sorted(g for g, c in counter.items() if c == best)[0]
+        total = len(members)
+        cands = {g: c for g, c in counter.items()
+                 if c / total <= HIGH_FREQ_RATIO}
+        pool = cands or dict(counter)
+        best_n = max(pool.values())
+        return sorted(g for g, c in pool.items()
+                      if c == best_n)[0][:LABEL_MAX_LEN]
 
     # ---------- 去重：同 scope 已有 → 只补证据 ----------
     def _create_or_link(
