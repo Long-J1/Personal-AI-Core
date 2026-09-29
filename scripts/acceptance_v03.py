@@ -90,7 +90,7 @@ def main() -> int:
         if body["total"] != 1:
             fail(f"R2 未归纳出假设：{body}")
         h = body["items"][0]
-        if h["scope"] != "interaction:提醒" or h["status"] != "tentative":
+        if h["scope"] != "interaction:提醒我" or h["status"] != "tentative":
             fail(f"假设内容不对：{h}")
         ok(f"H2-R2 归纳：scope={h['scope']} confidence={h['confidence']}")
 

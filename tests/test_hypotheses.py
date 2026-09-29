@@ -352,3 +352,30 @@ def test_export_and_clear_all(hyp, ctx):
     assert hyp.clear_all() == 1
     assert hyp.count_live() == 0
     assert hyp.get_detail(h.id) is None
+
+
+def test_support_coverage(stores):
+    """support_coverage：{hypo_id: (status, {(type, id)})} 单查询。"""
+    mem, ctx, hyp = stores
+    e1 = _interaction(ctx, "考试前一天提醒我")
+    h, _ = hyp.create("用户可能接受提前提醒", "interaction:提醒")
+    assert hyp.support_coverage() == {}
+    hyp.add_evidence(h.id, "support", "context", e1.id)
+    cov = hyp.support_coverage()
+    assert cov == {h.id: ("tentative", {("context", e1.id)})}
+    hyp.reject(h.id, reason="不需要")
+    cov = hyp.support_coverage()
+    assert cov[h.id][0] == "rejected"
+
+
+def test_support_coverage(hyp, ctx):
+    """support_coverage：{hypo_id: (status, {(type, id)})} 单查询。"""
+    h, _ = hyp.create("用户可能接受提前提醒", "interaction:提醒")
+    assert hyp.support_coverage() == {}
+    e1 = _ctx_entry(ctx, "考试前一天提醒我")
+    hyp.add_evidence(h.id, "support", "context", e1.id)
+    cov = hyp.support_coverage()
+    assert cov == {h.id: ("tentative", {("context", e1.id)})}
+    hyp.reject(h.id, reason="不需要")
+    cov = hyp.support_coverage()
+    assert cov[h.id][0] == "rejected"

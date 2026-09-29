@@ -54,7 +54,7 @@ def test_h4_induce_then_prompt_then_correct(chain):
     r1 = conv.chat("你好")
     assert hyp.count_live() == 1
     h = hyp.list_hypotheses()[0]
-    assert h.scope == "interaction:提醒" and h.status == "tentative"
+    assert h.scope == "interaction:提醒我" and h.status == "tentative"  # P0 标签
     # 首轮组装时假设尚未诞生（归纳跑在沉淀之后），空是正确的
     assert r1.to_dict()["hypotheses_used"] == []
 
@@ -153,3 +153,17 @@ def test_apply_creates_records_truncated_content(store, context_store):
     assert res3.created and len(res3.created[0]["content"]) <= 10
     row = context_store.get_entry(res3.created[0]["id"])
     assert row.content == res3.created[0]["content"]
+
+
+def test_same_turn_reject_retracts_pending(chain):
+    """同轮问出又否决：收回挂起，元数据置空，不留僵尸问题。"""
+    conv, model, hyp, ctx = chain
+    conv.chat("你好")
+    conv.chat("在吗")
+    r3 = conv.chat("不对，我一般不需要这种提醒")
+    assert r3.to_dict()["verification_question"] is None
+    assert hyp.get_pending() is None
+    # 全库只有一个假设（没有改述复活的双胞胎）
+    assert len(hyp.list_hypotheses(live_only=False)) == 1
+    r4 = conv.chat("今天天气不错")
+    assert r4.to_dict()["verification_question"] is None

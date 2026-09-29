@@ -368,9 +368,13 @@ def is_pattern_declaration(message: str) -> bool:
 
 
 def pattern_scope_for(message: str) -> str:
-    """B 路径 scope：首个有效关键词，无则 自述（确定性）。"""
+    """B 路径 scope：首个有效关键词的首个二连字，无则 自述（确定性）。
+
+    不取整串长词：整串作标签会让话题相关过于严格（用户几乎不可能
+    原样复述七八个字），二连字召回优先；误命中由冷却/次数/否决兜底。
+    """
     from core.context import extract_keywords
     for k in extract_keywords(message or ""):
         if len(k) >= 2:
-            return f"user:{k}"
+            return f"user:{k[:2]}"
     return "user:自述"

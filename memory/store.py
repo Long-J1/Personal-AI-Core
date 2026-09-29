@@ -233,6 +233,14 @@ class MemoryStore:
             params.append(until_epoch)
         return where, params
 
+
+    def count_events_since(self, since_epoch: float) -> int:
+        """指定时刻之后的新增事件数（周报统计用）。"""
+        with closing(self._connect()) as con:
+            return int(con.execute(
+                "SELECT COUNT(*) FROM events WHERE created_at_epoch >= ?",
+                (since_epoch,),
+            ).fetchone()[0])
     def count_events(self) -> int:
         with closing(self._connect()) as con:
             return int(con.execute("SELECT COUNT(*) FROM events").fetchone()[0])

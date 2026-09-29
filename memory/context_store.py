@@ -443,6 +443,15 @@ class ContextStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
+
+    def count_since(self, since_epoch: float) -> int:
+        """指定时刻之后新增的活跃条目数（周报统计用）。"""
+        with closing(self._connect()) as con:
+            return int(con.execute(
+                "SELECT COUNT(*) FROM context_entries"
+                " WHERE active=1 AND created_at_epoch >= ?",
+                (since_epoch,),
+            ).fetchone()[0])
     def count_active(self) -> int:
         with closing(self._connect()) as con:
             return int(

@@ -346,6 +346,34 @@ class HypothesisStore:
             ).fetchall()
         return [self._row_to_hypo(r) for r in rows]
 
+
+    def count_log_since(self, actions: tuple, since_epoch: float) -> int:
+        """指定时刻之后某类变更次数（周报统计用）。"""
+        marks = ','.join('?' * len(actions))
+        with closing(self._connect()) as con:
+            return int(con.execute(
+                f"SELECT COUNT(*) FROM hypothesis_log WHERE action IN"
+                f" ({marks}) AND epoch >= ?",
+                (*actions, since_epoch),
+            ).fetchone()[0])
+
+    def support_coverage(self) -> dict:
+        """所有非删除假设的支持证据覆盖：{hypo_id: (status, {(type, id)})}。
+
+        归纳器用它防"改述复活"：同一批素材（即使被改写换了标签）
+        不许建第二个假设。单查询，归纳每轮只调一次。"""
+        with closing(self._connect()) as con:
+            rows = con.execute(
+                "SELECT h.id, h.status, e.source_type, e.source_id"
+                " FROM hypotheses h JOIN hypothesis_evidence e"
+                " ON e.hypothesis_id = h.id"
+                " WHERE h.status != 'deleted' AND e.polarity='support'",
+            ).fetchall()
+        out: dict = {}
+        for r in rows:
+            st, s = out.setdefault(r[0], (r[1], set()))
+            s.add((r[2], r[3]))
+        return out
     def count_live(self) -> int:
         with closing(self._connect()) as con:
             return int(con.execute(

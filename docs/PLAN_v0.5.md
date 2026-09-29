@@ -4,7 +4,7 @@
 > 成长模型（Observation → Hypothesis → Pattern → Strategy）、V0.4 审计结论、
 > 用户 V0.5 范围决议（2026-09-29，含 6 条调整）。
 > 前置：V0.4 已交付（tag `v0.4.0`）；P0/P1/P2 按本文件 §二执行。
-> 状态：**设计中（未开工，不写代码）**
+> 状态：**已完成**（2026-09-30，P0/P1/P2 + Pattern 双源 + Goal + Reflection 全过）
 
 ---
 

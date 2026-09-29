@@ -211,3 +211,11 @@ def test_resolve_order_hyp_first(flow):
     conv.chat("对的")
     assert hyp.get(h.id).status == "confirmed"
     assert pat.get(p.id).pending_question == "规律问题？"  # 本轮没动它
+
+
+def test_pattern_scope_bigram_label():
+    """B scope 取首关键词首个二连字（召回优先，不过严）。"""
+    from core.verifier import pattern_scope_for
+    assert pattern_scope_for("我发现我一到截止前就熬夜") == "user:发现"
+    assert pattern_scope_for("我总是提前半小时到") == "user:提前"
+    assert pattern_scope_for("嗯") == "user:自述"

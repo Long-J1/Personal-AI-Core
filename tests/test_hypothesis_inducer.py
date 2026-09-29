@@ -222,3 +222,37 @@ def test_p0_label_deterministic(stores, tmp_path):
     I2(mem2, ctx2, hyp2).induce_all()
     second = sorted(h.scope for h in hyp2.list_hypotheses())
     assert first == second and len(first) == 1
+
+
+# ---------- 改述复活回归（纠正改写内容 → 不许建双胞胎） ----------
+
+def test_relabel_does_not_revive(stores):
+    """纠正改写条目内容 → R2 重打标签也不许建双胞胎（成员重叠去重）。"""
+    mem, ctx, hyp = stores
+    e1 = _interaction(ctx, "考试前一天提醒我")
+    e2 = _interaction(ctx, "重要事情提前提醒我")
+    ind = Inducer(mem, ctx, hyp)
+    r1 = ind.induce_all()
+    assert len(r1.created) == 1
+    first_id = r1.created[0]
+    # 模拟纠正改写 e2（内容变，id 不变）：新标签与旧 scope 不同
+    assert ctx.correct_entry(e2.id, "用户不需要提前提醒", reason="用户否决")
+    r2 = ind.induce_all()
+    assert r2.created == [], [h.scope for h in hyp.list_hypotheses()]
+    assert hyp.count_live() == 1
+    assert hyp.get(first_id).status == "tentative"
+
+
+def test_rejected_members_not_revived(stores):
+    """成员归属被否决假设 → 换标签也不复活（尊重否决）。"""
+    mem, ctx, hyp = stores
+    e1 = _interaction(ctx, "考试前一天提醒我")
+    e2 = _interaction(ctx, "重要事情提前提醒我")
+    ind = Inducer(mem, ctx, hyp)
+    r1 = ind.induce_all()
+    hyp.reject(r1.created[0], reason="不需要")
+    ctx.correct_entry(e2.id, "用户不需要提前提醒", reason="用户否决")
+    r2 = ind.induce_all()
+    assert r2.created == []
+    assert r2.skipped == r1.created
+    assert hyp.count_live() == 0

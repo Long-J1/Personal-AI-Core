@@ -244,6 +244,33 @@ class Inducer:
         return sorted(g for g, c in pool.items()
                       if c == best_n)[0][:LABEL_MAX_LEN]
 
+    def _covering_live_hypo(
+        self, members: list[tuple[str, str]], source_type: str
+    ) -> str | None:
+        """成员被单个 live 假设全部覆盖 → 返回其 id（只补证据不新建）。
+
+        覆盖按 (source_type, source_id) 认，不按文字认。
+        """
+        want = {(source_type, sid) for sid, _ in members}
+        if not want:
+            return None
+        for hid, (status, have) in self.hyp.support_coverage().items():
+            if status in ("tentative", "confirmed") and want <= have:
+                return hid
+        return None
+
+    def _covering_rejected_hypo(
+        self, members: list[tuple[str, str]], source_type: str
+    ) -> str | None:
+        """成员被单个 rejected 假设全部覆盖 → 返回其 id（尊重否决，不复活）。"""
+        want = {(source_type, sid) for sid, _ in members}
+        if not want:
+            return None
+        for hid, (status, have) in self.hyp.support_coverage().items():
+            if status == "rejected" and want <= have:
+                return hid
+        return None
+
     # ---------- 去重：同 scope 已有 → 只补证据 ----------
     def _create_or_link(
         self,
@@ -270,6 +297,24 @@ class Inducer:
             # 同 scope 已被用户否决：尊重否决，不新建、不喂料、不打扰
             log.info("归纳跳过 [%s]：该主题曾被用户否决", scope)
             result.skipped.append(existing[0].id)
+            return
+        # 成员重叠去重：纠正改写条目内容会导致 R2 重打标签（scope 漂移），
+        # scope 精确去重此时 miss；同一批素材（按 id 认，不按文字认）
+        # 若已被某个假设覆盖，只补证据不新建——防"改述复活"。
+        covering = self._covering_live_hypo(members, source_type)
+        if covering is not None:
+            for source_id, excerpt in members:
+                self.hyp.add_evidence(
+                    covering, "support", source_type, source_id,
+                    excerpt=excerpt)
+            result.linked.append(covering)
+            log.info("归纳去重 [成员重叠→%s]：补 %d 条证据",
+                     covering[:8], len(members))
+            return
+        rejected = self._covering_rejected_hypo(members, source_type)
+        if rejected is not None:
+            log.info("归纳跳过 [%s]：素材归属被否决假设，不复活", scope)
+            result.skipped.append(rejected)
             return
         hypo, skip = self.hyp.create(statement, scope,
                                      detail={"rule": scope.split(":")[0]})
