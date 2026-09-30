@@ -27,10 +27,17 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   role TEXT NOT NULL,             -- user | assistant
   content TEXT NOT NULL,
   epoch REAL NOT NULL,
-  iso TEXT NOT NULL
+  iso TEXT NOT NULL,
+  suppressed INTEGER NOT NULL DEFAULT 0   -- V0.5.3：1=别记轮，进 prompt 时隐藏
 );
 CREATE INDEX IF NOT EXISTS idx_chat_conv ON chat_messages(conv_id, epoch);
 """
+
+# 进 prompt 时隐藏轮的占位符（V0.5.3：不断连贯——模型知道这里有一轮但看不见，
+# 而不是对话断了；UI 回看不受影响）。
+SUPPRESSED_PLACEHOLDER = (
+    "[本轮用户要求不记录，内容已隐藏，不可引用、不可复述]"
+)
 
 
 def _now() -> datetime:
@@ -44,6 +51,13 @@ class ChatStore:
         self._lock = threading.Lock()
         with closing(self._connect()) as con:
             con.executescript(_SCHEMA)
+            # V0.5.3 migration：老库补 suppressed 列（默认 0 = 老行为全可见）
+            cols = {r[1] for r in con.execute(
+                "PRAGMA table_info(chat_messages)").fetchall()}
+            with con:
+                if "suppressed" not in cols:
+                    con.execute("ALTER TABLE chat_messages ADD COLUMN suppressed"
+                                " INTEGER NOT NULL DEFAULT 0")
             con.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -92,17 +106,22 @@ class ChatStore:
             )
 
     # ---------- 消息 ----------
-    def append(self, conv_id: str, role: str, content: str) -> None:
+    def append(self, conv_id: str, role: str, content: str,
+               suppressed: bool = False) -> None:
+        """追加一条消息。suppressed=True 标别记轮（V0.5.3）。
+
+        老调用零改动（默认 False）。UI 回看不受影响，只有进 prompt 过滤。
+        """
         if not content:
             return
         now = _now()
         with self._lock, closing(self._connect()) as con:
             with con:
                 con.execute(
-                    "INSERT INTO chat_messages (id, conv_id, role, content, epoch, iso) "
-                    "VALUES (?,?,?,?,?,?)",
+                    "INSERT INTO chat_messages (id, conv_id, role, content, epoch,"
+                    " iso, suppressed) VALUES (?,?,?,?,?,?,?)",
                     (uuid.uuid4().hex, conv_id, role, content,
-                     now.timestamp(), now.isoformat()),
+                     now.timestamp(), now.isoformat(), 1 if suppressed else 0),
                 )
                 con.execute(
                     "UPDATE conversations SET updated_epoch=? WHERE id=?",
@@ -130,6 +149,42 @@ class ChatStore:
                     (conv_id, limit),
                 ).fetchall()
         return [dict(r) for r in rows]
+
+    def history_for_prompt(
+        self, conv_id: str, limit: int = 50, order: str = "asc"
+    ) -> list[dict]:
+        """进 prompt 的历史：suppressed 轮替换为占位符（V0.5.3）。
+
+        与 history() 的区别只在这一处——UI 回看调 history()（原文可见），
+        prompt 组装调本方法（隐藏轮不可引用、不可复述）。
+        返回项多一个 `suppressed` 键（0/1），调用方可审计。
+        """
+        with closing(self._connect()) as con:
+            cols = {r[1] for r in con.execute(
+                "PRAGMA table_info(chat_messages)").fetchall()}
+            sup_sel = ("suppressed" if "suppressed" in cols else "0 AS suppressed")
+            if order == "desc":
+                rows = con.execute(
+                    "SELECT role, content, iso, " + sup_sel +
+                    " FROM chat_messages WHERE conv_id=? "
+                    "ORDER BY epoch DESC, rowid DESC LIMIT ?",
+                    (conv_id, limit),
+                ).fetchall()
+                rows = list(reversed(rows))
+            else:
+                rows = con.execute(
+                    "SELECT role, content, iso, " + sup_sel +
+                    " FROM chat_messages WHERE conv_id=? "
+                    "ORDER BY epoch ASC, rowid ASC LIMIT ?",
+                    (conv_id, limit),
+                ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            if d.get("suppressed"):
+                d["content"] = SUPPRESSED_PLACEHOLDER
+            out.append(d)
+        return out
 
     def count_messages(self, conv_id: str | None = None) -> int:
         with closing(self._connect()) as con:

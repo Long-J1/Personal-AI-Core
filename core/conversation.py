@@ -60,8 +60,10 @@ NO_MEMORIZE_RE = re.compile("|".join(NO_MEMORIZE_PATTERNS))
 # 本轮 system prompt 注入的固定指令（可测：断言含此文案）
 NO_MEMORIZE_PROMPT_RULE = (
     "【本轮不记录】用户要求这次内容不进入长期记忆。"
-    "如提及记忆，必须诚实说明这次内容不会进入长期记忆；"
-    "禁止说“记住了/已清除记忆”等暗示已执行删除的话术。"
+    "你的上下文里看不到本轮具体内容（已被隐藏）。"
+    "如被问及该轮，必须说'你要求那部分不记录，我这里没有保留'；"
+    "禁止复述任何细节（你也看不到，编出来就是撒谎）；"
+    "禁止对其他轮次内容声称'不会记'（只对被隐藏轮次做此声明）。"
 )
 
 
@@ -231,8 +233,10 @@ class ConversationService:
                 events.append(e)
         events = events[: self.settings.chat_events_total]
 
-        # 取最近 N 条并按时间正序进入提示词（desc 取最近，再翻回正序）
-        history = self.chat_store.history(
+        # 取最近 N 条并按时间正序进入提示词（desc 取最近，再翻回正序）。
+        # V0.5.3：走 history_for_prompt——别记轮替换为占位符，
+        # 模型看不到原文（不可引用、不可复述）；UI 回看不受影响。
+        history = self.chat_store.history_for_prompt(
             session_id, limit=self.settings.chat_history_max, order="desc"
         )
 
@@ -450,10 +454,11 @@ class ConversationService:
         if paused:
             log.info("暂停中：回答已给出，但不写消息、不沉淀")
         elif no_memorize:
-            # V0.5.2 P0-3：零学习写入；history 照常追加保证对话连贯
+            # V0.5.3 P0-3：零学习写入；history 照常追加保证对话连贯，
+            # 但本轮两条标 suppressed=1（进 prompt 时隐藏，不可引用）。
             # （history 不属于五个长期表，不违反"DB 零新增"验收）
-            self.chat_store.append(sid, "user", message)
-            self.chat_store.append(sid, "assistant", answer)
+            self.chat_store.append(sid, "user", message, suppressed=True)
+            self.chat_store.append(sid, "assistant", answer, suppressed=True)
         else:
             self.ctx.mark_used(e.id for e in entries)
             for e in entries:  # 内存对象同步（回复里的 used_count 是"用过之后"）

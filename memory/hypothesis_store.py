@@ -299,7 +299,10 @@ class HypothesisStore:
         sql = "SELECT * FROM hypotheses"
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY confidence DESC, updated_at_epoch DESC LIMIT ?"
+        # V0.5.3：溢出假设垫底（quota_overflow 低优先级，不主动引用影响回答；
+        # list_for_prompt 经此函数，自动生效）
+        sql += (" ORDER BY CASE WHEN scope LIKE 'quota_overflow:%' THEN 1"
+                " ELSE 0 END, confidence DESC, updated_at_epoch DESC LIMIT ?")
         with closing(self._connect()) as con:
             rows = con.execute(sql, (*params, limit)).fetchall()
         return [self._row_to_hypo(r) for r in rows]

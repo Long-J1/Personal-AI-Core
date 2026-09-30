@@ -625,7 +625,15 @@ class Depositor:
                     confidence=0.95 if grade == "user_direct" else 0.8,
                 )
                 if entry is None:
-                    log.debug("新增跳过：%s", skip)
+                    # V0.5.3：配额溢出 → 转假设池（memory 没记但没丢，可转正）。
+                    # hyp 未注入时无处可去，仍跳过（老测试 test_quota_merge_only
+                    # 依赖此行为：hyp=None 时 res.created 仍为空）。
+                    if (skip or "").startswith("overflow:") and self.hyp is not None:
+                        self._overflow_to_hypothesis(
+                            "；".join(parts), kind, grade)
+                        budget -= 1
+                    else:
+                        log.debug("新增跳过：%s", skip)
                 else:
                     budget -= 1
                     # 记录落库后的实际内容，前后端一致
@@ -646,6 +654,24 @@ class Depositor:
                     continue
                 budget -= 1
                 log.info("推测转假设待验证：%s", hypo_text[:40])
+
+    def _overflow_to_hypothesis(self, text: str, kind: str,
+                                grade: str) -> None:
+        """配额溢出转假设池（V0.5.3，四不准见 PLAN §5.2）。
+
+        scope 前缀 `quota_overflow`：选择器/归纳/晋升据此前缀过滤，
+        保证低优先级、不验证、不参与 pattern。失败只记日志。
+        """
+        try:
+            hypo, _ = self.hyp.create(
+                text, f"quota_overflow:{kind}",
+                detail={"rule": "quota_overflow", "grade": grade})
+        except Exception as exc:
+            log.warning("溢出转假设失败（跳过）：%s", exc)
+            return
+        if hypo is None:
+            return
+        log.info("quota_overflow [%s] 转假设待验证：%s", kind, text[:40])
 
     def _apply_event(self, data: dict, result: DepositResult) -> None:
         ev = data.get("event")

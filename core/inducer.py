@@ -120,6 +120,8 @@ class Inducer:
             )
 
     # ---------- R2：相处偏好主题 ----------
+    # V0.5.3 注：归纳源是 context 条目，配额溢出内容没进 context，
+    # 天然不参与归纳，无需 scope 过滤（晋升侧见 pattern_engine 防御性过滤）。
     def _rule_interaction_theme(self, result: InduceResult) -> None:
         entries = self.ctx.list_entries(kind="interaction")
         result.checked_interactions = len(entries)

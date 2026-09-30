@@ -58,6 +58,10 @@ class PatternEngine:
         try:
             groups: dict[str, list] = {}
             for h in self.hyp.list_hypotheses(status="confirmed", limit=200):
+                # V0.5.3：溢出假设不参与 pattern 生成（防御性过滤；
+                # 溢出恒为 tentative，本来也进不了 confirmed 组）
+                if (h.scope or "").startswith("quota_overflow:"):
+                    continue
                 groups.setdefault(h.scope, []).append(h)
             for scope in sorted(groups):
                 members = groups[scope]

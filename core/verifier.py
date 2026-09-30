@@ -151,6 +151,9 @@ def select_candidate(
     for h in hyp_store.list_hypotheses(live_only=True, limit=200):
         if h.status != "tentative":
             continue
+        # V0.5.3：溢出假设不触发验证（只当未来分析材料）
+        if (h.scope or "").startswith("quota_overflow:"):
+            continue
         if not (CONFIRM_BAND[0] <= h.confidence < CONFIRM_BAND[1]):
             continue
         try:

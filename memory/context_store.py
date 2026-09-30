@@ -424,7 +424,10 @@ class ContextStore:
                          KIND_LABELS.get(kind, kind), best_sim, best_id[:8])
                 return None, f"merged:{best_id}"
             if merge_only:
-                return None, "配额已满且无相似条目可合并"
+                # V0.5.3：配额满不再静默丢——返回 overflow，调用方转假设池。
+                # "宁可少记（memory 没记），不能假装记住（东西没丢，可转正）"。
+                log.info("quota_overflow [%s]：%s", kind, content[:60])
+                return None, f"overflow:{kind}"
             with con:
                 entry = ContextEntry(
                     id=uuid.uuid4().hex, kind=kind, content=content,
