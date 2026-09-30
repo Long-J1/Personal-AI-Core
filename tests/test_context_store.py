@@ -130,10 +130,10 @@ def test_quota_merge_only(context_store):
     res = DepositResult()
     dep._apply_creates(
         {"new": [{"kind": "fact", "content": "今天天气完全无关配额测试"}]},
-        res)
+        res, user_text="今天天气完全无关配额测试")
     assert res.created == []  # 配额打满：不新建
     dep._apply_creates(
         {"new": [{"kind": "fact", "content": "用户喜欢食物1号啊"}]},
-        res)
+        res, user_text="用户喜欢食物1号啊")
     assert res.created == []  # 合并也不进 created
     assert context_store.count_active() == 10  # 总量有上界

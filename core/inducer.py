@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 from memory.context_store import ContextStore
@@ -40,9 +41,13 @@ STOP_GRAMS = frozenset({
     "啊", "吧", "把", "被", "让", "去", "来", "上", "下", "里",
     "前", "后", "时", "事情", "东西", "问题", "方面", "保持", "一致",
     "进行", "相关", "时候", "一下", "一点", "已经", "经常", "总是",
-    "不要",
+    "不要", "系统",
 })
 LABEL_MAX_LEN = 8            # 主题标签最长字数（scope 可读性）
+LABEL_MIN_LEN = 2            # 清洗后不足此长度直接丢弃该组（宁可少猜）
+# 标签原话约束：候选串每个字必须在 user_direct/user_confirmed 成员内容里
+# 出现过；全由模型措辞拼成的串没有资格当标签
+LABEL_ORIGIN_GRADES = ("user_direct", "user_confirmed")
 GIANT_SPLIT_MIN = 6          # 超过此规模的组尝试二次切分
 HIGH_FREQ_RATIO = 0.5        # 出现在超半数条目里的 bigram 退出 label 候选
 
@@ -140,6 +145,9 @@ class Inducer:
             if len(members) < INTERACTION_THEME_MIN:
                 continue
             label = self._theme_label(members, keys)
+            if not label:
+                log.debug("主题标签清洗后为空，跳过该组")
+                continue
             scope = f"interaction:{label}"
             statement = (
                 f"用户在「{label}」方面多次表达过相处偏好，"
@@ -205,6 +213,33 @@ class Inducer:
             for i in range(len(cand) - 1)
         )
 
+    _STRIP_CHARS = (
+        "“”‘’" + "「」『』【】" + "\x22\x27"
+    )
+    _STRIP_RE = re.compile(
+        "[\\[\\]()\uFF08\uFF09<>\u300A\u300B\u3008\u3009"
+        "#@\uFF0A*\u00B7\u2026\u2014\\-_+/\\\\=|~`^$%&?!"
+        "\uFF1F\uFF01\uFF0C\u3001\uFF1B\uFF1A]")
+    _NUM_PREFIX_RE = re.compile(
+        "^(?:#\\d+|\\d+[\\.\\)、]|\\(\\d+\\)|[①②③④⑤⑥⑦⑧⑨⑩])")
+    _AI_PREFIX_RE = re.compile("^(?:AI|用户希望AI|系统)")
+
+    @staticmethod
+    def clean_label(text: str) -> str:
+        """标签清洗：去引号/标点/编号/AI 前缀/空洞词，限长。
+        返回 "" 表示丢弃（调用方跳过该组）。确定性。"""
+        t = text or ""
+        # 顺序重要：编号先行（标点剥掉后 "#1 (2)" 就认不出来了）
+        t = Inducer._NUM_PREFIX_RE.sub("", t)
+        for _q in Inducer._STRIP_CHARS:
+            t = t.replace(_q, "")
+        t = Inducer._STRIP_RE.sub("", t)
+        t = Inducer._AI_PREFIX_RE.sub("", t)
+        t = t.strip()
+        if len(t) < LABEL_MIN_LEN:
+            return ""
+        return t[:LABEL_MAX_LEN]
+
     @staticmethod
     def _theme_label(members: list, keys: dict[str, set[str]]) -> str:
         """组内最长公共子串（含非停用词）；并列字典序首个；截断保可读。
@@ -214,6 +249,14 @@ class Inducer:
         """
         contents = {m.id: m.content for m in members}
         texts = [contents[m.id] for m in members]
+        # 原话约束：候选串每个字必须出自 user 直接表达过的成员；
+        # 无此类成员时回退全员（老数据默认 inferred，不能直接判死刑）。
+        origin_chars: set[str] = set()
+        for m in members:
+            if getattr(m, "source_grade", "inferred") in LABEL_ORIGIN_GRADES:
+                origin_chars.update(contents[m.id])
+        if not origin_chars:
+            origin_chars = set("".join(texts))
         base = texts[0]
         best = ""
         for i in range(len(base)):
@@ -225,11 +268,13 @@ class Inducer:
                     continue
                 if not Inducer._has_content_gram(cand):
                     continue
+                if any(c not in origin_chars for c in cand):
+                    continue
                 if len(cand) > len(best) or (
                         len(cand) == len(best) and cand < best):
                     best = cand
         if best:
-            return best[:LABEL_MAX_LEN]
+            return Inducer.clean_label(best)
         # 回退：组内最高频 bigram（高频>半数的不配当标签）
         from collections import Counter
         counter: Counter[str] = Counter()
@@ -241,8 +286,8 @@ class Inducer:
                  if c / total <= HIGH_FREQ_RATIO}
         pool = cands or dict(counter)
         best_n = max(pool.values())
-        return sorted(g for g, c in pool.items()
-                      if c == best_n)[0][:LABEL_MAX_LEN]
+        return Inducer.clean_label(
+            sorted(g for g, c in pool.items() if c == best_n)[0])
 
     def _covering_live_hypo(
         self, members: list[tuple[str, str]], source_type: str

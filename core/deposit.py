@@ -100,6 +100,243 @@ def _is_ungrounded_question(user_text: str, entries,
     return True
 
 
+# ---------- V0.5.2 防火墙：来源分类（确定性，不调模型）----------
+# 优先级：硬拦截 > 用户原话 > 推断降级/advisory丢弃 > 兜底 inferred。
+INFER_CONNECTORS = ("说明了", "这说明", "意味着", "表明", "看来", "反映出",
+                    "可见", "看出来", "说明")
+# AI 定语动词：含这些词 + 指向 AI 行为 = 用户对 AI 的要求（正常走）；
+# 否则泛化建议直接丢弃（advisory，连表都不建）。
+AI_DIRECTED_VERBS = ("提醒", "回答", "记住", "理解", "告诉")
+# 硬拦截：过去时断言（无证据时）/ 性格评价。日期人名走专用探测。
+PAST_CLAIM_PATTERNS = ("你之前说过", "上次你提到", "你说过", "之前说过",
+                       "上次提到", "以前说过")
+# 性格评价句式 → 系统生成嫌疑，拒绝（"你/用户是个…的人" 或 程度词+性格字）。
+# 模型主语多为"用户"，只列"你很X"会漏，故用词表 + 句式双判。
+PERSONALITY_WORDS = ("很懒", "很笨", "很聪明", "很乖",
+                     "真懒", "真笨", "性格是")
+# 硬否决词：指向事实性错误 → rejected；其余显式否决（别/不要/纠正）
+# 属行为纠偏 → outdated（软否认）。子集须 ⊆ hypothesis_store.DENY_KEYWORDS。
+HARD_DENY_WORDS = ("不对", "不是", "没有", "错了", "胡说")
+_DATE_CHARS = "年月日号"
+_DIGIT_CHARS = "0123456789一二三四五六七八九十百千万"
+_WEEK_TAIL = "一二三四五六日天末"
+_NAME_MARKERS = ("名叫", "名字是", "叫")
+_PUNCT = ("，", "。", "、", "；", "：", "！", "？", "…", "—", "·",
+          "（", "）", "(", ")", "[", "]", "【", "】")
+_PRONOUN_PREFIX = ("用户", "咱们", "我们", "大家", "你", "我", "他", "她",
+                   "它")
+
+
+def _norm_text(text: str) -> str:
+    t = text or ""
+    for p in _PUNCT:
+        t = t.replace(p, "")
+    t = "".join(t.split())
+    changed = True
+    while changed:
+        changed = False
+        for pre in _PRONOUN_PREFIX:
+            if t.startswith(pre) and len(t) > len(pre) + 1:
+                t = t[len(pre):]
+                changed = True
+                break
+    return t
+
+
+def _split_clauses(content: str) -> list[str]:
+    # 混合句拆散分类，防搭车；最长优先防部分重叠。
+    parts, buf, i = [], "", 0
+    text = content or ""
+    cons = sorted(INFER_CONNECTORS, key=len, reverse=True)
+    while i < len(text):
+        hit = None
+        for c in cons:
+            if text.startswith(c, i):
+                hit = c
+                break
+        if hit:
+            if buf.strip():
+                parts.append(buf.strip())
+            buf = hit
+            i += len(hit)
+        else:
+            buf += text[i]
+            i += 1
+    if buf.strip():
+        parts.append(buf.strip())
+    # 分句残留的尾巴标点剥掉："用户说考试前提醒，" → "用户说考试前提醒"
+    # （切分副产品，不属于记忆内容；下游分类/入库直接用干净子句）
+    cleaned = [p.rstrip("，,。、；;：:！!？? \t") for p in parts]
+    cleaned = [p for p in cleaned if p]
+    return cleaned or [content]
+
+
+def _find_date_spans(text: str) -> list[str]:
+    """提取精确日期 token（"9月30日"/"30日"/"下周三"?→"周[尾]"）。
+
+    窗口式提取会把上下文（如"用户"）框进探针，导致用户原话里的日期
+    也对不上——这里只收日期本体，且必须含数字（防"日子/号码"误报）。
+    """
+    out = []
+    t = text or ""
+
+    def digits_before(pos: int) -> int:
+        lo = pos
+        while lo > 0 and t[lo - 1] in _DIGIT_CHARS:
+            lo -= 1
+        return lo
+
+    for i, ch in enumerate(t):
+        token = None
+        if ch in ("月", "号"):
+            lo = digits_before(i)
+            hi = i + 1
+            if ch == "月":
+                while hi < len(t) and t[hi] in _DIGIT_CHARS:
+                    hi += 1
+                if hi < len(t) and t[hi] in "日号":
+                    hi += 1
+            token = t[lo:hi]
+        elif ch == "日":
+            lo = digits_before(i)
+            if lo < i:
+                token = t[lo:i + 1]
+        elif ch == "周" and i + 1 < len(t) and t[i + 1] in _WEEK_TAIL:
+            token = t[digits_before(i):i + 2]
+        if (token and len(token) >= 2 and token not in out
+                and any(d in token for d in _DIGIT_CHARS)):
+            out.append(token)
+    return out
+
+
+def _find_name_probes(text: str) -> list[str]:
+    out = []
+    t = text or ""
+    for m in sorted(_NAME_MARKERS, key=len, reverse=True):
+        idx = t.find(m)
+        while idx >= 0:
+            out.append(t[max(0, idx - 6):idx + 6])
+            idx = t.find(m, idx + 1)
+    return out
+
+
+def _has_db_evidence(text: str, entries, store) -> bool:
+    kws = _keywords(text)
+    if not kws:
+        return False
+    corpus = [e.content for e in (entries or [])]
+    if store is not None:
+        try:
+            corpus.extend(
+                e.description for e in store.list_events(limit=20))
+        except Exception:
+            pass
+    for line in corpus:
+        if kws & _keywords(line):
+            return True
+    return False
+
+
+def _is_db_grounded(text: str, entries, store) -> bool:
+    """条目内容在既有理解/事件里有据可查（共享≥2 个二连字）。
+
+    有据复述不是推测："CSP最近状态怎么样"→"CSP备考顺利"这类有依据
+    提问的沉淀必须留在 memory（V0.5.1 保证），否则被防火墙误伤。
+    """
+    kws = _match_grams(text)
+    if len(kws) < 2:
+        return False
+    corpus = [e.content for e in (entries or [])]
+    if store is not None:
+        try:
+            corpus.extend(
+                e.description for e in store.list_events(limit=20))
+        except Exception:
+            pass
+    for line in corpus:
+        if len(kws & _match_grams(line)) >= 2:
+            return True
+    return False
+
+
+def _probes_have_source(probes, user_text, entries, store) -> bool:
+    if not probes:
+        return False
+    hay = [user_text or ""]
+    hay.extend(e.content or "" for e in (entries or []))
+    if store is not None:
+        try:
+            hay.extend(e.description or ""
+                       for e in store.list_events(limit=20))
+        except Exception:
+            pass
+    big = chr(10).join(hay)
+    return any(p in big for p in probes)
+
+
+def _is_personality_judgment(text: str) -> bool:
+    if any(w in text for w in PERSONALITY_WORDS):
+        return True
+    return "是个" in text and "的人" in text
+
+
+def classify_source(content, user_text, entries, store, kind=""):
+    # 返回 (grade, reason)：user_direct / inferred / advisory / reject。
+    text = (content or "").strip()
+    if not text:
+        return "reject", "内容为空"
+    # 分句残留的尾巴标点（"用户说考试前提醒，"）剥掉再判——
+    # 这是 _split_clauses 切分的副产品，不属于记忆内容
+    text = text.rstrip("，,。、；;：:！!？? \t")
+    if not text:
+        return "reject", "内容为空"
+    if (any(p in text for p in PAST_CLAIM_PATTERNS)
+            and not _has_db_evidence(text, entries, store)):
+        return "reject", "无证据的过去时断言"
+    # 硬拦截：既往事件断言（上次/之前 + 发生/做过/去过/见过）无证据
+    if (("上次" in text or "之前" in text)
+            and any(w in text for w in ("发生", "做过", "去过", "见过"))
+            and not _has_db_evidence(text, entries, store)):
+        return "reject", "无证据的既往事件断言"
+    probes = _find_date_spans(text) + _find_name_probes(text)
+    if probes and not _probes_have_source(probes, user_text, entries,
+                                          store):
+        return "reject", "无出处的具体日期/人名"
+    if _is_personality_judgment(text):
+        return "reject", "性格评价（system_generated 嫌疑）"
+    if ("你应该" in text or "你们应该" in text) and not any(
+            v in text for v in AI_DIRECTED_VERBS):
+        return "advisory", "泛化建议，非记忆内容"
+    norm_item, norm_user = _norm_text(text), _norm_text(user_text)
+    if norm_item and norm_item in norm_user:
+        return "user_direct", None
+    # 复述改写（"用户不吃香菜" vs "我不吃香菜"）靠二连字召回；
+    # 含推断连接词的不在此列（走 inferred），防搭车。
+    # 阈值按 kind 分：interaction 本就是"用户对 AI 的要求"，先验更高取宽松线；
+    # 其余取严格线。硬拦截照常先行，不受阈值影响。
+    # （数量门同样分档：interaction 允许单主题词命中如"简短"；
+    #  其余 kind 要求≥2，防单字巧合。）
+    if not any(c in text for c in INFER_CONNECTORS):
+        try:
+            gi = ContextStore._bigrams(norm_item)
+            gu = ContextStore._bigrams(norm_user)
+            shared = gi & gu
+            denom = min(len(gi), len(gu))
+            # interaction 放宽到 0.2：D007 场景实测共享 4/16=0.25 刚好压线，
+            # 其余 kind 保持严格线防误判
+            bar = 0.2 if kind == "interaction" else 0.4
+            need = 1 if kind == "interaction" else 2
+            if len(shared) >= need and denom and len(shared) / denom >= bar:
+                return "user_direct", None
+        except Exception:
+            pass
+    # 既有理解的复述：有据可查 → 可进 memory（不冒充用户原话）
+    if (not any(c in text for c in INFER_CONNECTORS)
+            and _is_db_grounded(text, entries, store)):
+        return "db_grounded", None
+    return "inferred", None
+
+
 @dataclass
 class DepositResult:
     created: list[dict] = field(default_factory=list)     # {id, kind, content}
@@ -129,12 +366,14 @@ class Depositor:
         *,
         settings: Settings | None = None,
         hypothesis_store=None,  # V0.3：纠正→假设联动；None 即关闭（注入兼容）
+        pattern_store=None,  # V0.5.2：纠正→规律级联；None 即关闭（注入兼容）
     ):
         self.ctx = context_store
         self.store = memory_store
         self.model = model
         self.settings = settings or default_settings
         self.hyp = hypothesis_store
+        self.pat = pattern_store
 
     # ---------- 提示词 ----------
     @staticmethod
@@ -205,8 +444,14 @@ class Depositor:
         alias_map = {f"#{i}": e for i, e in enumerate(entries, start=1)}
         self._apply_corrections(data, alias_map, result, user_text)
         if grounded:
-            self._apply_creates(data, result)
+            self._apply_creates(data, result, user_text, entries)
             self._apply_event(data, result)
+        else:
+            # 无依据提问门：new[] 全数拦下，动作同样可审计（firewall_reject）
+            for item in (data.get("new") or []):
+                if isinstance(item, dict) and item.get("content"):
+                    log.info("firewall_reject [无依据提问门]：%s",
+                             str(item["content"])[:60])
         self._fallback_denial(user_text, answer, entries, result)
         return result
 
@@ -217,8 +462,10 @@ class Depositor:
         不依赖模型 JSON（解析失败/模型没提取时仍能工作）；
         已有纠正生效时不重复处罚。候选条目限定为本轮进入 prompt 的理解，
         关联文本 = 用户原话 + 本轮回答（回答复述了依据时能对上"这样"类指代）。
+        V0.5.2（D017 ①）：命中条目直接标 outdated/rejected（不断根），
+        硬否决（不对/不是/没有/错了/胡说）→ rejected，其余 → outdated。
         """
-        if result.corrected or self.hyp is None:
+        if result.corrected:
             return
         if not _is_explicit_denial(user_text or ""):
             return
@@ -228,6 +475,7 @@ class Depositor:
             log.warning("显式否决但无关键词可关联（跳过兜底）：%s",
                         (user_text or "")[:40])
             return
+        hard = any(w in str(user_text or "") for w in HARD_DENY_WORDS)
         hit_any = False
         for e in entries or []:
             entry_kws = _match_grams(e.content)
@@ -236,16 +484,31 @@ class Depositor:
             need = min(2, len(entry_kws)) if entry_kws else 2
             if len(shared) < need:
                 continue
+            marked = False
             try:
-                hits = self.hyp.record_correction_hit(
-                    e.id, user_text, "规则兜底：显式否决")
+                # V0.5.2：先标记理解本身——这是"纠正不断根"的主语
+                marked = self.ctx.set_memory_status(
+                    e.id, "rejected" if hard else "outdated",
+                    reason="user_correction")
             except Exception as exc:
-                log.warning("兜底联动失败（%s）：%s", e.id[:8], exc)
-                continue
-            if hits:
+                log.warning("兜底标记失败（%s）：%s", e.id[:8], exc)
+            if marked:
                 hit_any = True
-                log.info("规则兜底纠正命中假设：%s",
-                         [h[:8] for h in hits])
+                log.info("规则兜底标记理解 %s：%s",
+                         e.id[:8], "rejected" if hard else "outdated")
+            if self.hyp is not None:
+                try:
+                    hits = self.hyp.record_correction_hit(
+                        e.id, user_text, "规则兜底：显式否决")
+                except Exception as exc:
+                    log.warning("兜底联动失败（%s）：%s", e.id[:8], exc)
+                    hits = []
+                if hits:
+                    hit_any = True
+                    log.info("规则兜底纠正命中假设：%s",
+                             [h[:8] for h in hits])
+            # V0.5.2（D017 ②）：规律级联（引用该条目的规律吃反证）
+            self._cascade_pattern("context", e.id, "规则兜底：显式否决")
         if not hit_any:
             log.warning("显式否决但本轮理解均无关联（跳过兜底）：%s",
                         (user_text or "")[:40])
@@ -299,8 +562,22 @@ class Depositor:
                             log.info("纠正联动假设：%s", [h[:8] for h in hit])
                     except Exception as exc:  # 联动失败不影响沉淀本身
                         log.warning("纠正联动假设失败（跳过）：%s", exc)
+                # V0.5.2（D017 ②）：纠正→规律级联（引用该条目的规律吃反证）
+                self._cascade_pattern(
+                    "context", target.id, reason or user_text[:200])
 
-    def _apply_creates(self, data: dict, result: DepositResult) -> None:
+    def _cascade_pattern(self, source_type: str, source_id: str,
+                         reason: str) -> None:
+        """纠正级联到规律；pat 未注入或异常一律跳过，绝不影响主流程。"""
+        if self.pat is None:
+            return
+        try:
+            self.pat.cascade_from_source(source_type, source_id, reason)
+        except Exception as exc:
+            log.warning("纠正级联到规律失败（跳过）：%s", exc)
+
+    def _apply_creates(self, data: dict, result: DepositResult,
+                         user_text: str = "", entries=None) -> None:
         new_items = data.get("new")
         if not isinstance(new_items, list):
             return
@@ -315,24 +592,60 @@ class Depositor:
             content = str(item.get("content") or "").strip()
             if kind not in KINDS:
                 continue
-            # P1：同 kind 近期新增打满配额 → 只合并模式（绝不新建）
-            throttled = self.ctx.count_recent_by_kind(
-                kind, days=RECENT_DAYS) >= KIND_WEEKLY_CAP
-            entry, skip = self.ctx.add_or_merge(
-                kind,
-                content,
-                source="chat",
-                max_chars=self.settings.deposit_max_chars,
-                merge_only=throttled,
-            )
-            if entry is None:
-                log.debug("新增跳过：%s", skip)
-                continue
-            budget -= 1
-            # 记录落库后的实际内容（add_entry 内部会截断），前后端一致
-            result.created.append(
-                {"id": entry.id, "kind": kind, "content": entry.content}
-            )
+            # V0.5.2 防火墙：逐子句分类，混合句拆散处理
+            direct_parts, grounded_parts, infer_parts = [], [], []
+            for clause in _split_clauses(content):
+                grade, why = classify_source(clause, user_text, entries,
+                                             self.store, kind)
+                if grade == "reject":
+                    log.info("firewall_reject [%s]：%s", why, clause[:40])
+                elif grade == "advisory":
+                    log.info("泛化建议丢弃：%s", clause[:40])
+                elif grade == "user_direct":
+                    direct_parts.append(clause)
+                elif grade == "db_grounded":
+                    grounded_parts.append(clause)
+                else:
+                    infer_parts.append(clause)
+            # 写 memory 的两档：用户原话 0.95 / 既有理解复述 0.8
+            for grade, parts in (("user_direct", direct_parts),
+                                 ("db_grounded", grounded_parts)):
+                if not parts or budget <= 0:
+                    continue
+                # P1：同 kind 近期新增打满配额 → 只合并模式（绝不新建）
+                throttled = self.ctx.count_recent_by_kind(
+                    kind, days=RECENT_DAYS) >= KIND_WEEKLY_CAP
+                entry, skip = self.ctx.add_or_merge(
+                    kind,
+                    "；".join(parts),
+                    source="chat",
+                    max_chars=self.settings.deposit_max_chars,
+                    merge_only=throttled,
+                    source_grade=grade,
+                    confidence=0.95 if grade == "user_direct" else 0.8,
+                )
+                if entry is None:
+                    log.debug("新增跳过：%s", skip)
+                else:
+                    budget -= 1
+                    # 记录落库后的实际内容，前后端一致
+                    result.created.append(
+                        {"id": entry.id, "kind": kind,
+                         "content": entry.content}
+                    )
+            if infer_parts and self.hyp is not None and budget > 0:
+                hypo_text = "；".join(infer_parts)
+                try:
+                    hypo, _ = self.hyp.create(
+                        hypo_text, f"inferred:{kind}",
+                        detail={"rule": "firewall"})
+                except Exception as exc:
+                    log.warning("推测转假设失败（跳过）：%s", exc)
+                    continue
+                if hypo is None:
+                    continue
+                budget -= 1
+                log.info("推测转假设待验证：%s", hypo_text[:40])
 
     def _apply_event(self, data: dict, result: DepositResult) -> None:
         ev = data.get("event")

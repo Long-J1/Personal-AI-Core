@@ -65,10 +65,29 @@ def scope_label(scope: str) -> str:
     return scope
 
 
+def _content_grams(text: str) -> set[str]:
+    """关键词二连字集合（去停用）。与 inducer 同一切分口径。"""
+    from core.context import extract_keywords
+    from core.inducer import MIN_KEYWORD_LEN, STOP_GRAMS
+    out: set[str] = set()
+    for kw in extract_keywords(text or ""):
+        if len(kw) == MIN_KEYWORD_LEN:
+            out.add(kw)
+        elif len(kw) > MIN_KEYWORD_LEN:
+            out.update(kw[i:i + 2] for i in range(len(kw) - 1))
+    return {g for g in out if g not in STOP_GRAMS}
+
+
 def is_related(message: str, scope: str) -> bool:
-    """本轮消息是否聊到该假设的主题（子串匹配，保守）。"""
+    """本轮消息是否聊到该假设的主题（共享非停用二连字即相关）。
+
+    V0.5.2：子串匹配在 P0 长标签下已死（用户不会复述整串），
+    改 bigram 交集召回；冷却/次数/否决继续兜底精度。
+    """
     label = scope_label(scope)
-    return len(label) >= MIN_LABEL_LEN and label in (message or "")
+    if len(label) < MIN_LABEL_LEN:
+        return False
+    return bool(_content_grams(message) & _content_grams(label))
 
 
 # ---------- 回答分类（否决优先）----------

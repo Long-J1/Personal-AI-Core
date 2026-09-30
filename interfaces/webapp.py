@@ -401,6 +401,12 @@ def create_app(
                     entry_id, req.content, reason="用户手动编辑")
             except Exception as exc:
                 log.warning("手动纠正联动假设失败（跳过）：%s", exc)
+            # V0.5.2（D017 ②）：手动纠正同样联动规律（吃反证）
+            try:
+                pattern_store.cascade_from_source(
+                    "context", entry_id, "用户手动编辑")
+            except Exception as exc:
+                log.warning("手动纠正联动规律失败（跳过）：%s", exc)
         entry = context_store.get_entry(entry_id)
         return {
             "ok": ok,

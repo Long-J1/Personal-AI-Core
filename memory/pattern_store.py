@@ -522,6 +522,39 @@ class PatternStore:
                  source_type, source_id[:8], conf)
         return True, None
 
+    # ---------- V0.5.2 纠正级联（D017 ②）----------
+    def cascade_from_source(self, source_type: str, source_id: str,
+                            reason: str = "") -> int:
+        """证据源（context 条目 / hypothesis）被纠正或否决 →
+        引用它的规律吃反证（PATTERN_CONTRADICT -0.20）。
+
+        幂等（add_evidence 有重复证据防线）；任何失败只记日志，
+        绝不掀翻调用方的主流程。返回成功绑定的条数。
+        """
+        n = 0
+        try:
+            with closing(self._connect()) as con:
+                rows = con.execute(
+                    "SELECT DISTINCT pattern_id FROM pattern_evidence"
+                    " WHERE source_type=? AND source_id=?"
+                    " AND polarity='support'",
+                    (source_type, source_id),
+                ).fetchall()
+            for r in rows:
+                ok, _ = self.add_evidence(
+                    r[0], "contradict", source_type, source_id,
+                    excerpt=(reason or "")[:200],
+                    detail={"cascade": "correction"},
+                )
+                if ok:
+                    n += 1
+        except Exception as exc:
+            log.warning("纠正级联到规律失败（跳过）：%s", exc)
+        if n:
+            log.info("纠正级联 %s:%s → %d 条规律吃反证",
+                     source_type, source_id[:8], n)
+        return n
+
     # ---------- 用户行为：确认 / 否决 ----------
     def confirm(self, pattern_id: str) -> bool:
         """用户确认：只改状态，不动 confidence（确认 ≠ 高置信度）。"""

@@ -11,10 +11,16 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 
-from memory.context_store import KIND_LABELS, ContextEntry, ContextStore
+from memory.context_store import (
+    KIND_LABELS,
+    ContextEntry,
+    ContextStore,
+    sort_for_prompt,
+)
 from memory.goal_store import GoalStore
 from memory.hypothesis_store import STATUS_LABELS, HypothesisStore
 from memory.pattern_store import PatternStore
@@ -40,6 +46,41 @@ from .verifier import (
 from .verifier import resolve_pending_answer, select_candidate
 
 log = logging.getLogger("core.conversation")
+
+# ---------- V0.5.2 P0-3："别记这个"硬开关（D017 ③，常量可测）----------
+# 用户明确要求不记录 → 本轮跳过 deposit/inducer/promoter/B-intake/goal-propose
+# 全部学习写路径（只读 + 回答照常；history 照常追加，保证对话连贯）。
+# 边界：history（chat_store）不算长期记忆——"DB 零新增"指
+# events/context/hypothesis/pattern/goal 五个长期表，history 追加不在此列。
+NO_MEMORIZE_PATTERNS = (
+    "别记", "不要保存", "不用记", "别存", "忘掉这个", "删除.{0,6}记忆",
+    "别记住", "不要记住", "没必要记", "只是随便聊聊", "不要以后提",
+)
+NO_MEMORIZE_RE = re.compile("|".join(NO_MEMORIZE_PATTERNS))
+# 本轮 system prompt 注入的固定指令（可测：断言含此文案）
+NO_MEMORIZE_PROMPT_RULE = (
+    "【本轮不记录】用户要求这次内容不进入长期记忆。"
+    "如提及记忆，必须诚实说明这次内容不会进入长期记忆；"
+    "禁止说“记住了/已清除记忆”等暗示已执行删除的话术。"
+)
+
+
+def is_no_memorize(text: str) -> bool:
+    """确定性判定：用户要求本轮不记录吗？
+
+    "记错"先剥离——"别记错，我是高二"是纠正（必须写），不是删除请求。
+    """
+    t = (text or "").replace("记错", "")
+    return bool(NO_MEMORIZE_RE.search(t))
+
+
+# ---------- V0.5.2 Test5：自夸限制（D017，常量可测）----------
+SELF_PRAISE_RE = re.compile("完全了解|彻底了解|非常了解|很懂我|全部了解")
+SELF_PRAISE_RULE = (
+    "【诚实边界】你目前只掌握 {n} 条理解、{m} 个待验证假设——"
+    "不得声称已完全了解或已经吃透用户；被问及了解程度时，"
+    "如实说明掌握范围与不确定性。"
+)
 
 CHAT_SYSTEM = (
     "你是 Personal AI——只属于当前用户的个人智能层，正在和主人日常对话。\n"
@@ -124,7 +165,8 @@ class ConversationService:
         self.goal = goal_store or GoalStore(store.db_path)
         self.depositor = Depositor(context_store, store, model,
                                    settings=self.settings,
-                                   hypothesis_store=self.hyp)
+                                   hypothesis_store=self.hyp,
+                                   pattern_store=self.pat)
         self.inducer = Inducer(store, context_store, self.hyp)
         self.promoter = PatternEngine(store, self.hyp, self.pat)
         # 话题命中复用回忆的检索级联（D003；模型只是构造需要，不参与检索）
@@ -134,7 +176,8 @@ class ConversationService:
 
     # ---------- 组装 ----------
     def _assemble(
-        self, session_id: str, entries: list[ContextEntry], message: str
+        self, session_id: str, entries: list[ContextEntry], message: str,
+        no_memorize: bool = False,
     ) -> tuple[list[dict], list[str], list]:
         from .context import plan_query
 
@@ -220,6 +263,13 @@ class ConversationService:
                 "\n\n=== 他的长期目标（仅引用，不推测；"
                 "建议应尽量与目标同向）===\n" + "\n".join(goal_lines)
             )
+        if no_memorize:
+            # V0.5.2 P0-3：本轮注入诚实回答指令（单测断言 system 含此文案）
+            system += "\n\n" + NO_MEMORIZE_PROMPT_RULE
+        if SELF_PRAISE_RE.search(message or ""):
+            # V0.5.2 Test5：自夸限制（数字如实，单测断言指令存在）
+            system += "\n\n" + SELF_PRAISE_RULE.format(
+                n=len(entries), m=len(hyps))
         messages: list[dict] = [{"role": "system", "content": system}]
         messages.extend(
             {"role": m["role"], "content": m["content"]} for m in history
@@ -319,12 +369,17 @@ class ConversationService:
         started = time.perf_counter()
         sid = self.chat_store.get_or_create_session(session_id)
         paused = self.store.paused
+        # V0.5.2 P0-3："别记这个"是硬开关，不让模型决定（D017 ③）
+        no_memorize = is_no_memorize(message)
+        if no_memorize:
+            log.info("用户要求不记录：本轮跳过全部学习写路径（history 照常）")
 
         # V0.4/V0.5：先解决上一轮挂起的验证问题（确认/否决立即生效，
-        # 本轮 prompt 就能用上），再组装。暂停时不学不问。
+        # 本轮 prompt 就能用上），再组装。暂停时不学不问；
+        # 不记录轮同样不写（挂起保持原样，下轮再谈）。
         # 解决顺序固定：假设 → 规律 → 目标（一次只解决一条，不双重分类）。
         verification_in = None
-        if not paused:
+        if not paused and not no_memorize:
             try:
                 if self.hyp.get_pending() is not None:
                     verification_in = resolve_pending_answer(
@@ -345,9 +400,12 @@ class ConversationService:
                          verification_in["verdict"])
 
         # ---- 读 ----
-        entries = self.ctx.list_entries(limit=self.settings.context_max_entries)
+        # V0.5.2（D017 ⑤）：质量排序——信任档 + 时间衰减决定谁进 prompt，
+        # 条数上限不变；prompt 文本格式不动（行为变化只来自顺序）。
+        entries = sort_for_prompt(
+            self.ctx.list_entries())[: self.settings.context_max_entries]
         messages, directives, hyps, pats = self._assemble(
-            sid, entries, message)
+            sid, entries, message, no_memorize=no_memorize)
         messages.append({"role": "user", "content": message})
 
         answer = self.model.chat(
@@ -391,6 +449,11 @@ class ConversationService:
         deposit: dict | None = None
         if paused:
             log.info("暂停中：回答已给出，但不写消息、不沉淀")
+        elif no_memorize:
+            # V0.5.2 P0-3：零学习写入；history 照常追加保证对话连贯
+            # （history 不属于五个长期表，不违反"DB 零新增"验收）
+            self.chat_store.append(sid, "user", message)
+            self.chat_store.append(sid, "assistant", answer)
         else:
             self.ctx.mark_used(e.id for e in entries)
             for e in entries:  # 内存对象同步（回复里的 used_count 是"用过之后"）

@@ -676,6 +676,14 @@ class HypothesisStore:
                     (CORRECTION_SET, now.isoformat(), now.timestamp(), hypo_id),
                 )
         log.info("假设 %s 被用户否决 → 0.25", hypo_id[:8])
+        # V0.5.2 级联（D017 ②）：引用它的规律同步吃反证。
+        # 本地导入防循环；失败只记日志，绝不掀翻否决主流程。
+        try:
+            from memory.pattern_store import PatternStore
+            PatternStore(self.db_path).cascade_from_source(
+                "hypothesis", hypo_id, reason or "假设被否决")
+        except Exception as exc:
+            log.warning("否决级联到规律失败（跳过）：%s", exc)
         return True
 
     def record_correction_hit(

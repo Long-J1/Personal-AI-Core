@@ -32,6 +32,19 @@ KIND_LABELS = {
 }
 SOURCES = ("chat", "observe", "correction", "manual", "system")
 
+# ---------- V0.5.2 信任边界（常量，单测锁定）----------
+# memory_status：active（可用）/ outdated（过时）/ rejected（被否认）
+# prompt 只读 active；历史保留可审计，不物理删除。
+MEMORY_STATUSES = ("active", "outdated", "rejected")
+# source_grade：user_direct（用户原话）/ user_confirmed（用户确认）/
+# db_grounded（既有理解的复述——有据可查才准进 memory，置信 0.8）/
+# inferred（模型推测，不进 memory，只进 hypothesis）/
+# system_generated（系统生成，拒绝入口，永不写入）
+SOURCE_GRADES = ("user_direct", "user_confirmed", "inferred",
+                 "system_generated", "db_grounded")
+DECAY_HALF_LIFE_DAYS = 30  # 闲置半衰期（天）：权重每 30 天减半
+CORRECTION_SET = 0.25      # 纠正/否认置信置位（与假设、规律的置位对齐）
+
 # ---------- P1 沉淀卫生（常量，单测锁定）----------
 SIM_MERGE_THRESHOLD = 0.6  # 二连字 Jaccard 相似度，达到即合并
 KIND_WEEKLY_CAP = 10       # 同 kind 7 天新增上限，超了只合并
@@ -48,7 +61,14 @@ CREATE TABLE IF NOT EXISTS context_entries (
   updated_at_iso TEXT NOT NULL,
   updated_at_epoch REAL NOT NULL,
   active INTEGER NOT NULL DEFAULT 1,
-  used_count INTEGER NOT NULL DEFAULT 0
+  used_count INTEGER NOT NULL DEFAULT 0,
+  memory_status TEXT NOT NULL DEFAULT 'active',
+  status_reason TEXT NOT NULL DEFAULT '',
+  source_grade TEXT NOT NULL DEFAULT 'inferred',
+  confidence REAL NOT NULL DEFAULT 0.5,
+  last_verified REAL NOT NULL DEFAULT 0.0,
+  evidence_count INTEGER NOT NULL DEFAULT 0,
+  contradiction_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_context_active ON context_entries(active, updated_at_epoch);
 
@@ -57,6 +77,7 @@ CREATE TABLE IF NOT EXISTS context_log (
   epoch REAL NOT NULL,
   iso TEXT NOT NULL,
   action TEXT NOT NULL,          -- create | correct | manual_edit | delete | restore
+                               -- | merge | outdated | rejected | verify
   entry_id TEXT NOT NULL,
   kind TEXT,
   content_before TEXT,
@@ -76,12 +97,57 @@ def _now() -> datetime:
     return datetime.now().astimezone()
 
 
+def decay_weight(confidence: float, last_verified_epoch: float,
+                 now_epoch: float | None = None) -> float:
+    """读取权重 = 可信度 × 半衰（闲置每 30 天减半）。确定性，可测。
+
+    上周偏好 vs 三个月前偏好必须有权重差，否则旧记忆永久平权。
+    """
+    import time
+    now = time.time() if now_epoch is None else now_epoch
+    idle_days = max(0.0, (now - (last_verified_epoch or 0.0)) / 86400)
+    return float(confidence) * (0.5 ** (idle_days / DECAY_HALF_LIFE_DAYS))
+
+
+def trust_level(confidence: float, source_grade: str, idle_days: float,
+                contradictions: int) -> str:
+    """高/中/低三档（只用于排序；展示后议，UI 不动）。"""
+    if contradictions > 0 or float(confidence) < 0.5:
+        return "low"
+    if (float(confidence) >= 0.8 and idle_days <= DECAY_HALF_LIFE_DAYS
+            and source_grade in ("user_direct", "user_confirmed")):
+        return "high"
+    return "medium"
+
+
+_TRUST_RANK = {"high": 0, "medium": 1, "low": 2}
+
+
+def sort_for_prompt(entries: list, now_epoch: float | None = None
+                    ) -> list:
+    """prompt 组装排序：（信任档，衰减权重 desc）。文本格式不动，
+    行为变化只来自顺序。"""
+    import time
+    now = time.time() if now_epoch is None else now
+    scored = []
+    for e in entries:
+        idle = max(0.0, (now - (e.last_verified or 0.0)) / 86400)
+        w = decay_weight(e.confidence, e.last_verified, now)
+        scored.append((_TRUST_RANK[trust_level(
+            e.confidence, e.source_grade, idle,
+            e.contradiction_count)], -w, e.updated_at, e))
+    scored.sort(key=lambda t: (t[0], t[1], str(t[2])))
+    return [t[3] for t in scored]
+
+
 class ContextEntry:
     """轻量条目（不用 pydantic，保持存储层零额外依赖）。"""
 
     __slots__ = (
         "id", "kind", "content", "source", "created_at", "updated_at",
-        "active", "used_count",
+        "active", "used_count", "memory_status", "status_reason",
+        "source_grade", "confidence", "last_verified",
+        "evidence_count", "contradiction_count",
     )
 
     def __init__(
@@ -94,6 +160,13 @@ class ContextEntry:
         updated_at: datetime,
         active: bool = True,
         used_count: int = 0,
+        memory_status: str = "active",
+        status_reason: str = "",
+        source_grade: str = "inferred",
+        confidence: float = 0.5,
+        last_verified: float = 0.0,
+        evidence_count: int = 0,
+        contradiction_count: int = 0,
     ):
         self.id = id
         self.kind = kind
@@ -103,6 +176,13 @@ class ContextEntry:
         self.updated_at = updated_at
         self.active = active
         self.used_count = used_count
+        self.memory_status = memory_status
+        self.status_reason = status_reason
+        self.source_grade = source_grade
+        self.confidence = confidence
+        self.last_verified = last_verified
+        self.evidence_count = evidence_count
+        self.contradiction_count = contradiction_count
 
     def to_public_dict(self) -> dict[str, Any]:
         return {
@@ -115,6 +195,13 @@ class ContextEntry:
             "updated_at": self.updated_at.isoformat(),
             "active": self.active,
             "used_count": self.used_count,
+            "memory_status": self.memory_status,
+            "status_reason": self.status_reason,
+            "source_grade": self.source_grade,
+            "confidence": round(self.confidence, 2),
+            "last_verified": self.last_verified,
+            "evidence_count": self.evidence_count,
+            "contradiction_count": self.contradiction_count,
             "date": self.created_at.strftime("%Y-%m-%d"),
             "time": self.created_at.strftime("%H:%M"),
         }
@@ -129,7 +216,44 @@ class ContextStore:
         self._lock = threading.Lock()
         with closing(self._connect()) as con:
             con.executescript(_SCHEMA)
-            con.commit()
+            # V0.5.2 migration：老库补信任列；last_verified 回填 updated_at
+            #（旧条目按"最后更新"起算闲置，诚实 decay）；
+            # source manual/correction 的行回填 user_confirmed/0.95（用户亲手写的）。
+            cols = {r[1] for r in con.execute(
+                "PRAGMA table_info(context_entries)").fetchall()}
+            with con:
+                for col, ddl in (
+                    ("memory_status",
+                     "ALTER TABLE context_entries ADD COLUMN memory_status"
+                     " TEXT NOT NULL DEFAULT 'active'"),
+                    ("status_reason",
+                     "ALTER TABLE context_entries ADD COLUMN status_reason"
+                     " TEXT NOT NULL DEFAULT ''"),
+                    ("source_grade",
+                     "ALTER TABLE context_entries ADD COLUMN source_grade"
+                     " TEXT NOT NULL DEFAULT 'inferred'"),
+                    ("confidence",
+                     "ALTER TABLE context_entries ADD COLUMN confidence"
+                     " REAL NOT NULL DEFAULT 0.5"),
+                    ("last_verified",
+                     "ALTER TABLE context_entries ADD COLUMN last_verified"
+                     " REAL NOT NULL DEFAULT 0.0"),
+                    ("evidence_count",
+                     "ALTER TABLE context_entries ADD COLUMN evidence_count"
+                     " INTEGER NOT NULL DEFAULT 0"),
+                    ("contradiction_count",
+                     "ALTER TABLE context_entries ADD COLUMN"
+                     " contradiction_count INTEGER NOT NULL DEFAULT 0"),
+                ):
+                    if col not in cols:
+                        con.execute(ddl)
+                con.execute(
+                    "UPDATE context_entries SET last_verified ="
+                    " updated_at_epoch WHERE last_verified = 0.0")
+                con.execute(
+                    "UPDATE context_entries SET source_grade='user_confirmed',"
+                    " confidence=0.95 WHERE source_grade='inferred'"
+                    " AND source IN ('manual', 'correction')")
         log.info("Personal Context 就绪：%s", self.db_path)
 
     def _connect(self) -> sqlite3.Connection:
@@ -147,18 +271,28 @@ class ContextStore:
         *,
         detail: dict | None = None,
         max_chars: int = 200,
+        source_grade: str = "inferred",
+        confidence: float = 0.5,
     ) -> tuple[ContextEntry | None, str | None]:
-        """新增一条理解。返回 (entry, None) 或 (None, 跳过原因)。"""
+        """新增一条理解。返回 (entry, None) 或 (None, 跳过原因)。
+
+        V0.5.2：来源等级与可信度由调用方（防火墙分类）给出，默认 inferred/0.5
+        （宁可低估，不许虚标）。
+        """
         if kind not in KINDS:
             return None, f"未知类型 {kind}"
         content = (content or "").strip()[:max_chars]
         if not content:
             return None, "内容为空"
+        if source_grade not in SOURCE_GRADES:
+            return None, f"未知来源等级 {source_grade}"
 
         now = _now()
         entry = ContextEntry(
             id=uuid.uuid4().hex, kind=kind, content=content, source=source,
             created_at=now, updated_at=now,
+            source_grade=source_grade, confidence=confidence,
+            last_verified=now.timestamp(),
         )
         with self._lock, closing(self._connect()) as con:
             # 去重：同内容的活跃条目已存在则跳过
@@ -173,10 +307,13 @@ class ContextStore:
                 con.execute(
                     "INSERT INTO context_entries "
                     "(id, kind, content, source, created_at_iso, created_at_epoch, "
-                    " updated_at_iso, updated_at_epoch, active, used_count) "
-                    "VALUES (?,?,?,?,?,?,?,?,1,0)",
+                    " updated_at_iso, updated_at_epoch, active, used_count,"
+                    " memory_status, status_reason, source_grade, confidence,"
+                    " last_verified, evidence_count, contradiction_count) "
+                    "VALUES (?,?,?,?,?,?,?,?,1,0,'active','',?,?,?,0,0)",
                     (entry.id, kind, content, source, now.isoformat(),
-                     now.timestamp(), now.isoformat(), now.timestamp()),
+                     now.timestamp(), now.isoformat(), now.timestamp(),
+                     source_grade, confidence, now.timestamp()),
                 )
                 self._log(
                     con, "create", entry.id, kind,
@@ -232,18 +369,23 @@ class ContextStore:
         detail: dict | None = None,
         max_chars: int = 200,
         merge_only: bool = False,
+        source_grade: str = "inferred",
+        confidence: float = 0.5,
     ) -> tuple[ContextEntry | None, str | None]:
         """新增；已有相似条目则合并（used+1 + 变更日志），不新建。
 
         返回 (entry, None) / (None, 跳过原因）。合并返回 (None, "merged:<id>")：
         调用方按"跳过"处理（不占新增配额、不进 created），但理解被强化了一次。
         merge_only=True 时绝不新建（配额打满后的只合并模式）。
+        grade/confidence 只用于新建分支（合并沿用旧条目等级）。
         """
         if kind not in KINDS:
             return None, f"未知类型 {kind}"
         content = (content or "").strip()[:max_chars]
         if not content:
             return None, "内容为空"
+        if source_grade not in SOURCE_GRADES:
+            return None, f"未知来源等级 {source_grade}"
         now = _now()
         with self._lock, closing(self._connect()) as con:
             dup = con.execute(
@@ -266,8 +408,10 @@ class ContextStore:
                 with con:
                     con.execute(
                         "UPDATE context_entries SET used_count = used_count + 1,"
+                        " last_verified=?, evidence_count = evidence_count + 1,"
                         " updated_at_iso=?, updated_at_epoch=? WHERE id=?",
-                        (now.isoformat(), now.timestamp(), best_id),
+                        (now.timestamp(), now.isoformat(), now.timestamp(),
+                         best_id),
                     )
                     self._log(
                         con, "merge", best_id, kind,
@@ -285,14 +429,19 @@ class ContextStore:
                 entry = ContextEntry(
                     id=uuid.uuid4().hex, kind=kind, content=content,
                     source=source, created_at=now, updated_at=now,
+                    source_grade=source_grade, confidence=confidence,
+                    last_verified=now.timestamp(),
                 )
                 con.execute(
                     "INSERT INTO context_entries "
                     "(id, kind, content, source, created_at_iso, created_at_epoch, "
-                    " updated_at_iso, updated_at_epoch, active, used_count) "
-                    "VALUES (?,?,?,?,?,?,?,?,1,0)",
+                    " updated_at_iso, updated_at_epoch, active, used_count,"
+                    " memory_status, status_reason, source_grade, confidence,"
+                    " last_verified, evidence_count, contradiction_count) "
+                    "VALUES (?,?,?,?,?,?,?,?,1,0,'active','',?,?,?,0,0)",
                     (entry.id, kind, content, source, now.isoformat(),
-                     now.timestamp(), now.isoformat(), now.timestamp()),
+                     now.timestamp(), now.isoformat(), now.timestamp(),
+                     source_grade, confidence, now.timestamp()),
                 )
                 self._log(
                     con, "create", entry.id, kind,
@@ -338,7 +487,53 @@ class ContextStore:
                 )
         log.info("理解纠正 %s：%s → %s", entry_id[:8],
                  (row["content"] if row else "?")[:40], new_content[:40])
+        # V0.5.2（D017 ②）：纠正命中 → 相似复本同步过时，打地鼠到此为止
+        try:
+            self.propagate_outdated(entry_id, row["kind"], row["content"])
+        except Exception as exc:
+            log.warning("纠正复本联动失败（跳过）：%s", exc)
         return True
+
+    def propagate_outdated(self, source_id: str, kind: str,
+                           ref_content: str) -> list[str]:
+        """纠正/否认命中 → 同 kind 相似复本一起标 outdated（propagated）。
+
+        历史保留可审计；prompt 只读 active（见 list_entries）。
+        返回受影响的复本 id 列表。
+        """
+        if not kind or not ref_content:
+            return []
+        now = _now()
+        affected: list[str] = []
+        with self._lock, closing(self._connect()) as con:
+            rows = con.execute(
+                "SELECT id, content FROM context_entries"
+                " WHERE active=1 AND memory_status='active'"
+                " AND kind=? AND id!=?",
+                (kind, source_id),
+            ).fetchall()
+            for r in rows:
+                if self._similarity(ref_content,
+                                    r["content"] or "") < SIM_MERGE_THRESHOLD:
+                    continue
+                with con:
+                    con.execute(
+                        "UPDATE context_entries SET memory_status='outdated',"
+                        " status_reason=?, confidence=?,"
+                        " contradiction_count = contradiction_count + 1,"
+                        " updated_at_iso=?, updated_at_epoch=? WHERE id=?",
+                        (f"propagated:{source_id}", CORRECTION_SET,
+                         now.isoformat(), now.timestamp(), r["id"]),
+                    )
+                    self._log(con, "outdated", r["id"], kind,
+                              content_before=None, content_after=None,
+                              detail={"reason": "propagated",
+                                      "from": source_id})
+                affected.append(r["id"])
+        if affected:
+            log.info("纠正复本联动：%s → %d 条相似复本标 outdated",
+                     source_id[:8], len(affected))
+        return affected
 
     def delete_entry(self, entry_id: str) -> bool:
         """删除（逻辑删）：立即失效，后续组装不再读取。"""
@@ -404,12 +599,27 @@ class ContextStore:
     # ---------- 读取 ----------
     @staticmethod
     def _row_to_entry(row: sqlite3.Row) -> ContextEntry:
+        keys = set(row.keys())
         return ContextEntry(
             id=row["id"], kind=row["kind"], content=row["content"],
             source=row["source"],
             created_at=datetime.fromisoformat(row["created_at_iso"]),
             updated_at=datetime.fromisoformat(row["updated_at_iso"]),
             active=bool(row["active"]), used_count=row["used_count"],
+            memory_status=(row["memory_status"]
+                           if "memory_status" in keys else "active"),
+            status_reason=(row["status_reason"]
+                           if "status_reason" in keys else ""),
+            source_grade=(row["source_grade"]
+                          if "source_grade" in keys else "inferred"),
+            confidence=(row["confidence"]
+                        if "confidence" in keys else 0.5),
+            last_verified=(row["last_verified"]
+                           if "last_verified" in keys else 0.0),
+            evidence_count=(row["evidence_count"]
+                            if "evidence_count" in keys else 0),
+            contradiction_count=(row["contradiction_count"]
+                                 if "contradiction_count" in keys else 0),
         )
 
     def list_entries(
@@ -417,7 +627,8 @@ class ContextStore:
     ) -> list[ContextEntry]:
         where, params = [], []
         if active_only:
-            where.append("active=1")
+            # V0.5.2：prompt 只读可用条目（outdated/rejected 不再参与组装）
+            where.append("active=1 AND memory_status='active'")
         if kind:
             where.append("kind=?")
             params.append(kind)
@@ -437,6 +648,58 @@ class ContextStore:
                 "SELECT * FROM context_entries WHERE id=?", (entry_id,)
             ).fetchone()
         return self._row_to_entry(row) if row else None
+
+    def set_memory_status(self, entry_id: str, status: str,
+                            reason: str = "") -> bool:
+        """标记 outdated/rejected（纠正不断根的核心动作）。
+
+        不删除：历史保留可审计；prompt 只读 active（见 list_entries）。
+        返回 False 表示条目不存在/已删除。
+        """
+        if status not in MEMORY_STATUSES or status == "active":
+            return False
+        reason = (reason or "")[:200]
+        now = _now()
+        with self._lock, closing(self._connect()) as con:
+            row = con.execute(
+                "SELECT active, kind, content FROM context_entries WHERE id=?",
+                (entry_id,),
+            ).fetchone()
+            if not row or not row["active"]:
+                return False
+            with con:
+                con.execute(
+                    "UPDATE context_entries SET memory_status=?,"
+                    " status_reason=?, confidence=?,"
+                    " contradiction_count = contradiction_count + 1,"
+                    " updated_at_iso=?, updated_at_epoch=? WHERE id=?",
+                    (status, reason, CORRECTION_SET, now.isoformat(),
+                     now.timestamp(), entry_id),
+                )
+                self._log(con, status, entry_id, row["kind"],
+                          content_before=None, content_after=None,
+                          detail={"reason": reason})
+        log.info("理解标记 %s %s：%s", status, entry_id[:8], reason[:40])
+        # V0.5.2（D017 ②）：否认命中 → 相似复本同步 outdated（锁外，防死锁）
+        try:
+            self.propagate_outdated(entry_id, row["kind"], row["content"])
+        except Exception as exc:
+            log.warning("否认复本联动失败（跳过）：%s", exc)
+        return True
+
+    def touch_verified(self, entry_ids: Iterable[str]) -> None:
+        """被引用/确认时刷新 last_verified + evidence_count（新鲜度依据）。"""
+        ids = list(entry_ids)
+        if not ids:
+            return
+        now = _now().timestamp()
+        with self._lock, closing(self._connect()) as con:
+            with con:
+                con.executemany(
+                    "UPDATE context_entries SET last_verified=?,"
+                    " evidence_count = evidence_count + 1 WHERE id=?",
+                    [(now, i) for i in ids],
+                )
 
     def mark_used(self, entry_ids: Iterable[str]) -> None:
         """记录条目被上下文使用过（证明 Context 真的参与了后续判断）。"""

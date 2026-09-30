@@ -149,7 +149,7 @@ def test_apply_creates_records_truncated_content(store, context_store):
     res3 = DepositResult()
     dep._apply_creates(
         {"new": [{"kind": "fact", "content": "这是一段超过十个字的长内容"}]},
-        res3)
+        res3, user_text="这是一段超过十个字的长内容")
     assert res3.created and len(res3.created[0]["content"]) <= 10
     row = context_store.get_entry(res3.created[0]["id"])
     assert row.content == res3.created[0]["content"]
