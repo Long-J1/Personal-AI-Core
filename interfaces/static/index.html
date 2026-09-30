@@ -34,7 +34,10 @@ html, body { height: 100%; }
 body {
   margin: 0; background: var(--sea); color: var(--ink);
   font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
-  line-height: 1.6; overflow-x: hidden;
+  line-height: 1.6; overflow: hidden;
+  /* v4 固定框架：视口锁死，滚动只发生在中央区 */
+  height: 100vh; height: 100dvh;
+  display: flex; flex-direction: column;
 }
 /* ---- 背景：冷纸纹 + 双色氛围（左青右粉紫，不对称） ---- */
 .sky { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
@@ -58,11 +61,18 @@ body {
 }
 /* ---- 顶栏 ---- */
 .topbar {
-  position: sticky; top: 0; z-index: 20;
+  flex: none;
   display: flex; align-items: center; gap: 9px;
   padding: 12px 24px;
   background: linear-gradient(var(--sea) 60%, transparent);
+  position: relative; z-index: 20;
 }
+.dopenbtn {
+  border: 1px solid var(--line); background: var(--card-glass);
+  border-radius: 999px; font-size: 12.5px; padding: 6px 14px;
+  color: var(--ink-soft); cursor: pointer; font-family: inherit;
+}
+.dopenbtn:hover { border-color: var(--teal); color: var(--ink); }
 .wordmark { font-size: 15px; font-weight: 600; letter-spacing: .02em; }
 .wordmark small { font-weight: 400; color: var(--ink-faint); margin-left: 8px; font-size: 12px; }
 /* 呼吸点：调小，慢慢才被发现 */
@@ -80,8 +90,36 @@ body {
 .topsp { flex: 1; }
 .modeltag { font-size: 12px; color: var(--ink-faint); }
 .modeltag b { color: var(--ink-soft); font-weight: 600; }
-/* ---- 空间主体 ---- */
-.space { position: relative; z-index: 1; max-width: 780px; margin: 0 auto; padding: 2vh 22px 40px; }
+/* ---- 应用框架 v5：左栏全高 + 右列（顶栏+中央区）。布局与主题分离：
+   这里只定位置和滚动，颜色全走 :root 变量 ---- */
+body > .shell { flex: 1; min-height: 0; display: flex; flex-direction: row; }
+.side {
+  flex: none; width: 204px; display: flex; flex-direction: column;
+  border-right: 1px solid var(--line); background: var(--glass);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  padding: 12px 10px; gap: 2px; z-index: 30;
+  transition: width .22s cubic-bezier(.32,.72,.35,1);
+}
+.side.mini { width: 58px; }
+.side.mini .slabel, .side.mini .sgroup { display: none; }
+.slogo { display: flex; align-items: center; gap: 8px; padding: 4px 8px 12px; font-weight: 600; font-size: 14px; }
+.sbtn {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  border: none; background: transparent; color: var(--ink-soft);
+  font-size: 13.5px; padding: 9px 10px; border-radius: 10px; cursor: pointer;
+  font-family: inherit; text-align: left; white-space: nowrap;
+}
+.sbtn:hover { background: var(--teal-faint); color: var(--ink); transform: none; }
+.sbtn.on { background: var(--ink); color: var(--sea); }
+.sbtn .ic { flex: none; width: 22px; text-align: center; font-size: 15px; }
+.sgroup { font-size: 10.5px; color: var(--ink-faint); padding: 12px 10px 4px; letter-spacing: .06em; }
+.sfoot { margin-top: auto; }
+.col { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+.space { position: relative; z-index: 1; max-width: 780px; margin: 0 auto; padding: 0 22px; width: 100%;
+  flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.scrollzone { flex: 1; min-height: 0; overflow-y: auto; padding: 2vh 0 18px; overscroll-behavior: contain; }
+.dock { flex: none; padding: 6px 0 4px; background: linear-gradient(transparent, var(--sea) 30%); }
+.dockfoot { text-align: center; color: var(--ink-faint); font-size: 10.5px; padding: 5px 0 3px; }
 /* ---- 视觉主体：潮汐。Home 的重心，大幅柔和抽象，三层缓漂 ---- */
 .tide-hero { position: relative; margin: 6px -22px 0; height: 260px; overflow: hidden; }
 .tide-hero svg { position: absolute; inset: 0; width: 100%; height: 100%; filter: blur(14px); opacity: .85; }
@@ -281,14 +319,32 @@ h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; 
 <body>
 <div class="sky"><div class="tide-a"></div><div class="tide-b"></div></div>
 
+<div class="shell">
+<aside class="side" id="sideBar">
+  <div class="slogo"><span id="liveDot" class="dot" title="AI 状态"></span><span class="slabel">Personal AI</span></div>
+  <button class="sbtn" id="btnNewChat"><span class="ic">＋</span><span class="slabel">新对话</span></button>
+  <div class="sgroup slabel">空间</div>
+  <button class="sbtn" data-open="memory"><span class="ic">◍</span><span class="slabel">记忆</span></button>
+  <button class="sbtn" data-open="hypo"><span class="ic">◎</span><span class="slabel">待验证</span></button>
+  <button class="sbtn" data-open="history"><span class="ic">▤</span><span class="slabel">回忆库</span></button>
+  <button class="sbtn" data-open="data"><span class="ic">▦</span><span class="slabel">工作台</span></button>
+  <div class="sgroup slabel">其他</div>
+  <button class="sbtn" data-open="observe"><span class="ic">◉</span><span class="slabel">观察</span></button>
+  <button class="sbtn" data-open="model"><span class="ic">⚙</span><span class="slabel">模型</span></button>
+  <div class="sfoot">
+    <button class="sbtn" id="sideToggle"><span class="ic">⇤</span><span class="slabel">收起</span></button>
+  </div>
+</aside>
+<div class="col">
 <header class="topbar">
-  <span id="liveDot" class="dot" title="AI 状态"></span>
   <span class="wordmark">Personal AI<small id="verTag">你的数字空间</small></span>
   <span class="topsp"></span>
+  <button class="dopenbtn" id="dopenBtn">记忆 · 设置</button>
   <span class="modeltag">模型 <b id="footModel">-</b> · <span id="modelBadge">检查中</span></span>
 </header>
 
 <main class="space">
+  <div class="scrollzone" id="scrollZone">
   <section class="tide-hero" aria-hidden="true">
     <div class="sunwrap"><div id="sunBody"></div><div id="sunLabel"></div></div>
     <svg viewBox="0 0 720 300" preserveAspectRatio="xMidYMid slice">
@@ -310,14 +366,6 @@ h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; 
     </div>
   </section>
 
-  <div class="motes" aria-hidden="true"><i></i><i></i><i></i></div>
-  <section class="composer" id="composerBox">
-    <div class="box">
-      <textarea id="msgInput" rows="1" placeholder="和它说点什么，它会记住重要的事"></textarea>
-      <button id="btnSend" class="sendbtn" title="发送">↑</button>
-    </div>
-    <div class="hintline" id="chatHint" hidden></div>
-  </section>
 
   <section id="chatLog" class="chatlog">
     <div class="chatempty" id="chatEmpty">
@@ -351,7 +399,21 @@ h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; 
       <div class="hint" id="ansMeta"></div>
     </div>
   </section>
+  </div><!-- /scrollzone -->
+  <div class="dock">
+  <div class="motes" aria-hidden="true"><i></i><i></i><i></i></div>
+  <section class="composer" id="composerBox">
+    <div class="box">
+      <textarea id="msgInput" rows="1" placeholder="和它说点什么，它会记住重要的事"></textarea>
+      <button id="btnSend" class="sendbtn" title="发送">↑</button>
+    </div>
+    <div class="hintline" id="chatHint" hidden></div>
+  </section>
+  <div class="dockfoot">本地运行 · 记忆只在这台电脑</div>
+  </div><!-- /dock -->
 </main>
+</div><!-- /col -->
+</div><!-- /shell -->
 
 <div class="scrim" id="scrim"></div>
 <aside class="drawer" id="drawer">
@@ -469,7 +531,6 @@ h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; 
   </div>
 </aside>
 
-<footer>本地运行 · 记忆只在这台电脑 · Personal AI V0.5.4 Beta</footer>
 
 <script>
 
@@ -670,7 +731,12 @@ function addBubble(role, text, meta) {
     div.appendChild(m);
   }
   $('chatLog').appendChild(div);
-  $('chatLog').scrollTop = $('chatLog').scrollHeight;
+  (function () {
+    var sz = document.getElementById('scrollZone');
+    if (!sz) return;
+    if (window.__paiNearBottom !== false)
+      sz.scrollTop = sz.scrollHeight;
+  })();
 }
 
 async function loadChatHistory() {
@@ -1146,6 +1212,34 @@ setInterval(loadStatus, 15000);
   });
   document.getElementById('drawerClose').addEventListener('click', closeDrawer);
   scrim.addEventListener('click', closeDrawer);
+  // 顶栏固定入口：任何滚动位置都能开 Drawer
+  var dopenBtn = document.getElementById('dopenBtn');
+  if (dopenBtn) dopenBtn.addEventListener('click', function () {
+    openDrawer('memory');
+  });
+  // 左栏收缩
+  var side = document.getElementById('sideBar');
+  var stg = document.getElementById('sideToggle');
+  if (side && stg) stg.addEventListener('click', function () {
+    side.classList.toggle('mini');
+  });
+  // 新对话（真功能：切 session，旧对话留库里）
+  var ncb = document.getElementById('btnNewChat');
+  if (ncb) ncb.addEventListener('click', function () {
+    chatSession = null;
+    var log = document.getElementById('chatLog');
+    if (log) log.innerHTML = '<div class="chatempty" id="chatEmpty">新的开始。说点什么——重要的事会被记住。</div>';
+    var sz = document.getElementById('scrollZone');
+    if (sz) sz.scrollTop = 0;
+  });
+  // 跟随滚动：只当用户已在底部附近（距底<140px）才跟随；
+  // 手动上翻看历史时绝不强制拉回
+  window.__paiNearBottom = true;
+  var __sz = document.getElementById('scrollZone');
+  if (__sz) __sz.addEventListener('scroll', function () {
+    window.__paiNearBottom =
+      (__sz.scrollHeight - __sz.scrollTop - __sz.clientHeight) < 140;
+  });
   // 模型短名（全名太长只占地方，title 留全名）
   var _ls = loadStatus;
   loadStatus = async function () {
