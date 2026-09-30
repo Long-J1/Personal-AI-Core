@@ -1,185 +1,342 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="tide">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Personal AI · Core V0.2</title>
+<title>Personal AI</title>
 <style>
-  :root {
-    --bg: #f4f5f8; --card: #ffffff; --ink: #1b1f2a; --muted: #6b7280;
-    --accent: #4f46e5; --accent-soft: #eef2ff; --ok: #059669; --bad: #dc2626;
-    --warn: #d97706; --line: #e5e7eb;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--ink);
-    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
-    line-height: 1.55;
-  }
-  header {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 14px 22px; background: var(--card); border-bottom: 1px solid var(--line);
-    position: sticky; top: 0; z-index: 10;
-  }
-  .brand { font-size: 18px; font-weight: 700; }
-  .brand .ver { font-size: 12px; font-weight: 500; color: var(--muted); margin-left: 6px; }
-  .badges { display: flex; gap: 8px; flex-wrap: wrap; }
-  .badge {
-    font-size: 12px; padding: 3px 10px; border-radius: 999px;
-    background: var(--accent-soft); color: var(--accent); font-weight: 600;
-  }
-  .badge.off { background: #fee2e2; color: var(--bad); }
-  .badge.muted { background: #f3f4f6; color: var(--muted); }
-  main { max-width: 880px; margin: 20px auto; padding: 0 16px; display: grid; gap: 16px; }
-  .card {
-    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
-    padding: 18px 20px; box-shadow: 0 1px 3px rgba(0,0,0,.04);
-  }
-  h2 { font-size: 16px; margin: 0 0 12px; }
-  h2 small { font-weight: 400; color: var(--muted); font-size: 12px; margin-left: 8px; }
-  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-  button, .filebtn {
-    border: 1px solid var(--line); background: #fff; color: var(--ink);
-    border-radius: 9px; padding: 8px 14px; font-size: 14px; cursor: pointer;
-    transition: .15s; font-family: inherit;
-  }
-  button:hover:not(:disabled), .filebtn:hover { border-color: var(--accent); color: var(--accent); }
-  button:disabled { opacity: .45; cursor: not-allowed; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.primary:hover:not(:disabled) { filter: brightness(1.1); color: #fff; }
-  button.danger { color: var(--bad); }
-  button.danger:hover { border-color: var(--bad); background: #fef2f2; }
-  input[type=text], input:not([type]), input[type=password], input[type=url] {
-    flex: 1; min-width: 220px; border: 1px solid var(--line); border-radius: 9px;
-    padding: 9px 12px; font-size: 14px; font-family: inherit; outline: none;
-  }
-  input:focus { border-color: var(--accent); }
-  select {
-    border: 1px solid var(--line); border-radius: 9px; padding: 9px 12px;
-    font-size: 14px; font-family: inherit; outline: none; background: #fff; color: var(--ink);
-  }
-  select:focus { border-color: var(--accent); }
-  label.fld { font-size: 13px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
-  video { width: 100%; max-height: 320px; border-radius: 10px; background: #000; margin-top: 10px; }
-  .hint { font-size: 13px; color: var(--muted); margin-top: 10px; }
-  .hint.warn { color: var(--warn); }
-  .chips { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
-  .chip {
-    font-size: 12px; padding: 4px 10px; border-radius: 999px;
-    background: var(--accent-soft); color: var(--accent); border: none;
-  }
-  .chip:hover { filter: brightness(.96); }
-  .result { display: flex; gap: 14px; margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 14px; }
-  .result img { width: 132px; height: 96px; object-fit: cover; border-radius: 8px; background: #eee; }
-  .eventbody { flex: 1; min-width: 0; }
-  .eventbody b { font-size: 15px; }
-  .meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
-  .tag {
-    font-size: 12px; background: #f3f4f6; border-radius: 6px; padding: 2px 8px; color: var(--muted);
-  }
-  .verdict { margin-top: 8px; font-size: 13px; font-weight: 600; }
-  .verdict.ok { color: var(--ok); }
-  .verdict.no { color: var(--bad); }
-  .answer {
-    margin-top: 12px; background: var(--accent-soft); border-radius: 10px;
-    padding: 12px 14px; font-size: 14px; white-space: pre-wrap; word-break: break-word;
-  }
-  .sources { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
-  .source {
-    font-size: 12px; background: #fff; border: 1px solid var(--line);
-    border-radius: 7px; padding: 3px 8px; color: var(--muted);
-  }
-  .source b { color: var(--ink); font-weight: 600; }
-  .tools button { font-size: 13px; padding: 6px 12px; }
-  .memlist { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 8px; }
-  .mem {
-    display: flex; gap: 12px; align-items: flex-start; border: 1px solid var(--line);
-    border-radius: 10px; padding: 10px 12px;
-  }
-  .mem .when { font-size: 12px; color: var(--muted); white-space: nowrap; min-width: 86px; }
-  .mem .desc { flex: 1; font-size: 14px; min-width: 0; word-break: break-word; }
-  .mem .desc small { color: var(--muted); display: block; }
-  .mem .imp { font-size: 11px; color: var(--warn); }
-  .mem button { padding: 4px 10px; font-size: 12px; }
-  footer { text-align: center; color: var(--muted); font-size: 12px; padding: 18px 0 26px; }
-  .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid #cbd5e1;
-    border-top-color: var(--accent); border-radius: 50%; animation: sp 1s linear infinite;
-    vertical-align: -2px; margin-right: 6px; }
-  @keyframes sp { to { transform: rotate(360deg); } }
-  .chatlog { display: flex; flex-direction: column; gap: 8px; max-height: 340px;
-    overflow-y: auto; padding: 4px 2px; }
-  .bubble { max-width: 80%; padding: 9px 13px; border-radius: 13px; font-size: 14px;
-    white-space: pre-wrap; word-break: break-word; }
-  .bubble.user { align-self: flex-end; background: var(--accent); color: #fff;
-    border-bottom-right-radius: 4px; }
-  .bubble.ai { align-self: flex-start; background: #f3f4f6; border-bottom-left-radius: 4px; }
-  .bubble .bmeta { display: block; margin-top: 6px; font-size: 11px; opacity: .72; }
-  .ctxhist { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
-  .ctxhist .tag { max-width: 100%; word-break: break-word; white-space: normal; }
-  .mem button { margin-left: 6px; }
+/* ============ Personal AI · 潮汐 v2 ============
+   蓝绿空间 + 粉紫强调。颜色像空气和光，不像油漆。
+   Theme 钩子：html[data-theme] 覆盖变量即新主题。 */
+:root {
+  --sea: #f2f7f6;              /* 冷白底，微青 */
+  --sea-deep: #e6efed;
+  --ink: #2e3837;
+  --ink-soft: #5f6f6d;
+  --ink-faint: #9db0ad;
+  --line: #d9e6e2;
+  --teal: #4fa39b;             /* 青绿：空间基础 */
+  --teal-soft: #e0f0ed;
+  --teal-faint: #eef6f4;
+  --lilac: #9a7fc4;            /* 粉紫：局部强调 */
+  --lilac-soft: #ece4f6;
+  --rose: #d98aa5;             /* 粉：生命时刻 */
+  --rose-soft: #f9e9ef;
+  --ok: #6f9e7a; --bad: #c26a5e; --warn: #c2954f;
+  --glass: rgba(242, 247, 246, .78);
+  --card-glass: rgba(255, 255, 255, .66);
+  --shadow-soft: 0 2px 18px rgba(70, 130, 122, .10);
+  --shadow-lift: 0 12px 36px rgba(70, 130, 122, .17);
+  --r-pebble: 24px 30px 22px 34px;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--sea); color: var(--ink);
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  line-height: 1.6; overflow-x: hidden;
+}
+/* ---- 背景：冷纸纹 + 双色氛围（左青右粉紫，不对称） ---- */
+.sky { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+.sky::before {
+  content: ""; position: absolute; inset: 0; opacity: .45;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 .35 0 0 0 0 .45 0 0 0 0 .43 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+.sky .tide-a {
+  position: absolute; top: -14%; left: -10%; width: 58%; height: 48%;
+  background:
+    radial-gradient(40% 55% at 45% 45%, rgba(79,163,155,.16), transparent 70%),
+    radial-gradient(28% 42% at 68% 62%, rgba(79,163,155,.10), transparent 70%);
+  filter: blur(8px);
+}
+.sky .tide-b {
+  position: absolute; top: -10%; right: -10%; width: 52%; height: 42%;
+  background:
+    radial-gradient(42% 55% at 60% 40%, rgba(154,127,196,.15), transparent 70%),
+    radial-gradient(30% 44% at 40% 65%, rgba(217,138,165,.12), transparent 70%);
+  filter: blur(8px);
+}
+/* ---- 顶栏 ---- */
+.topbar {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: 9px;
+  padding: 12px 24px;
+  background: linear-gradient(var(--sea) 60%, transparent);
+}
+.wordmark { font-size: 15px; font-weight: 600; letter-spacing: .02em; }
+.wordmark small { font-weight: 400; color: var(--ink-faint); margin-left: 8px; font-size: 12px; }
+/* 呼吸点：调小，慢慢才被发现 */
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--teal); position: relative; flex: none; animation: breathe 5s ease-in-out infinite; }
+@keyframes breathe {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(79,163,155,.30); }
+  50% { transform: scale(1.1); box-shadow: 0 0 0 6px rgba(79,163,155,0); }
+}
+.dot.thinking::after {
+  content: ""; position: absolute; inset: -5px; border-radius: 50%;
+  border: 1px solid var(--rose); opacity: .7; animation: ripple 1.8s ease-out infinite;
+}
+@keyframes ripple { from { transform: scale(.6); opacity: .8; } to { transform: scale(1.25); opacity: 0; } }
+.dot.off { background: var(--ink-faint); animation: none; }
+.topsp { flex: 1; }
+.modeltag { font-size: 12px; color: var(--ink-faint); }
+.modeltag b { color: var(--ink-soft); font-weight: 600; }
+/* ---- 空间主体 ---- */
+.space { position: relative; z-index: 1; max-width: 780px; margin: 0 auto; padding: 2vh 22px 40px; }
+/* ---- 视觉主体：潮汐。Home 的重心，大幅柔和抽象，三层缓漂 ---- */
+.tide-hero { position: relative; margin: 6px -22px 0; height: 260px; overflow: hidden; }
+.tide-hero svg { position: absolute; inset: 0; width: 100%; height: 100%; filter: blur(14px); opacity: .85; }
+.tide-hero .wave1 { animation: drift1 11s ease-in-out infinite alternate; }
+.tide-hero .wave2 { animation: drift2 14s ease-in-out infinite alternate; }
+.tide-hero .wave3 { animation: drift1 18s ease-in-out infinite alternate-reverse; }
+@keyframes drift1 { from { transform: translateX(-2.5%); } to { transform: translateX(2.5%); } }
+@keyframes drift2 { from { transform: translateX(2%); } to { transform: translateX(-2%); } }
+/* ---- 时间太阳：环境感知。按真实时间定位+变色（早金→午白→暮粉橙→夜月） ----
+   未来 Rain/Night 主题走同一钩子换色，不增天气 API。 */
+.sunwrap { position: absolute; top: 6%; right: 8%; width: 120px; height: 120px; pointer-events: none; }
+#sunBody {
+  position: absolute; left: 50%; top: 50%; width: 46px; height: 46px;
+  border-radius: 48% 52% 50% 50%;
+  background: radial-gradient(circle at 38% 35%, #fffdf4, #f6d98a 65%, rgba(246,217,138,0));
+  box-shadow: 0 0 30px rgba(246,200,110,.45);
+  transform: translate(-50%, -50%);
+  transition: background 1s, box-shadow 1s;
+}
+#sunBody.dusk {
+  background: radial-gradient(circle at 38% 35%, #fff5ee, #ee9a7a 65%, rgba(238,154,122,0));
+  box-shadow: 0 0 30px rgba(238,154,122,.45);
+}
+#sunBody.night {
+  background: radial-gradient(circle at 38% 35%, #f4f7ff, #b9c8e8 65%, rgba(185,200,232,0));
+  box-shadow: 0 0 26px rgba(185,200,232,.5);
+}
+#sunLabel { position: absolute; left: 50%; bottom: 2px; transform: translateX(-50%); font-size: 10.5px; color: var(--ink-faint); white-space: nowrap; }
+.tide-hero .moon {
+  position: absolute; top: 18%; right: 16%; width: 54px; height: 54px;
+  border-radius: 50% 46% 52% 48%;
+  background: radial-gradient(circle at 35% 35%, #fffdf6, var(--rose-soft) 70%, rgba(217,138,165,.35));
+  box-shadow: 0 0 34px rgba(217,138,165,.35);
+  animation: floaty 7s ease-in-out infinite;
+}
+.tide-hero .leaf { position: absolute; border-radius: 60% 40% 55% 45%; opacity: .8; animation: floaty 9s ease-in-out infinite; }
+.tide-hero .leaf.l1 { left: 12%; bottom: 22%; width: 26px; height: 20px; background: var(--teal-soft); border: 1px solid var(--line); }
+.tide-hero .leaf.l2 { left: 20%; bottom: 34%; width: 16px; height: 13px; background: var(--lilac-soft); animation-delay: -3s; }
+.tide-hero .leaf.l3 { right: 30%; bottom: 18%; width: 20px; height: 15px; background: var(--rose-soft); animation-delay: -5s; }
+@keyframes floaty { 0%, 100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-9px) rotate(3deg); } }
+.greet { position: relative; margin-top: -48px; }
+.greet h1 { font-size: 31px; font-weight: 600; margin: 0 0 2px; letter-spacing: .01em; }
+.greet h1 .tint { color: var(--teal); }
+.greet p { margin: 0 0 18px; color: var(--ink-soft); font-size: 15px; }
+/* 漂浮入口 */
+.pills { display: flex; gap: 9px; flex-wrap: wrap; margin-bottom: 22px; }
+.pill {
+  border: 1px solid var(--line); background: var(--card-glass);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  border-radius: 999px; padding: 7px 15px; font-size: 13px; color: var(--ink-soft);
+  cursor: pointer; transition: transform .18s, box-shadow .18s, border-color .18s;
+  font-family: inherit;
+}
+.pill:hover { transform: translateY(-2px); box-shadow: var(--shadow-soft); border-color: var(--teal); color: var(--ink); }
+.pill b { font-weight: 700; color: var(--teal); }
+.pill:nth-child(2) b { color: var(--lilac); }
+/* ---- Composer：鹅卵石 v2。粉紫流动边框 + 内部微光 ---- */
+.composer {
+  position: relative; background: var(--glass);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  border: 1px solid var(--line); border-radius: var(--r-pebble);
+  padding: 8px 8px 8px 20px; box-shadow: var(--shadow-soft);
+  transition: box-shadow .25s, transform .25s;
+  overflow: hidden;
+}
+.composer::before {  /* 内部微光：缓移，不抢眼 */
+  content: ""; position: absolute; inset: 0; pointer-events: none; opacity: 0;
+  background: linear-gradient(105deg, transparent 40%, rgba(154,127,196,.10) 50%, transparent 60%);
+  background-size: 250% 100%; transition: opacity .3s;
+}
+.composer:focus-within::before { opacity: 1; animation: sheen 3.2s linear infinite; }
+@keyframes sheen { from { background-position: 120% 0; } to { background-position: -120% 0; } }
+.composer:focus-within {
+  border-color: transparent;
+  background: linear-gradient(var(--glass), var(--glass)) padding-box,
+    linear-gradient(120deg, var(--teal), var(--lilac), var(--rose)) border-box;
+  border: 1px solid transparent;
+  box-shadow: var(--shadow-lift), 0 0 0 4px rgba(154,127,196,.12);
+  transform: translateY(-1px);
+}
+.composer .box { display: flex; gap: 10px; align-items: flex-end; position: relative; }
+.composer textarea {
+  flex: 1; border: none; outline: none; resize: none; background: transparent;
+  font: inherit; font-size: 15px; color: var(--ink);
+  min-height: 28px; max-height: 160px; padding: 10px 0; line-height: 1.55;
+}
+.composer textarea::placeholder { color: var(--ink-faint); }
+.sendbtn {
+  flex: none; width: 40px; height: 40px; border-radius: 50%; border: none;
+  background: var(--teal); color: #fff; font-size: 17px; cursor: pointer;
+  transition: transform .16s, background .2s;
+  font-family: inherit; line-height: 1;
+}
+.sendbtn:hover:not(:disabled) { background: var(--lilac); transform: scale(1.06); }
+.sendbtn.ready { background: var(--teal); }
+.sendbtn.ready:hover:not(:disabled) { background: var(--lilac); }
+.sendbtn:active:not(:disabled) { transform: scale(.93); }
+.sendbtn:disabled { opacity: .35; cursor: not-allowed; }
+.composer .hintline { font-size: 12px; color: var(--ink-faint); padding: 2px 12px 8px; min-height: 18px; position: relative; }
+.composer .hintline.warn { color: var(--warn); }
+/* 气泡粒子：Composer 附近缓浮的三个小圆（装饰，无功能） */
+.motes { position: relative; height: 0; }
+.motes i { position: absolute; border-radius: 50%; opacity: .55; animation: floaty 8s ease-in-out infinite; }
+.motes i:nth-child(1) { left: 6%; top: -34px; width: 9px; height: 9px; background: var(--teal-soft); border: 1px solid var(--line); }
+.motes i:nth-child(2) { left: 12%; top: -52px; width: 6px; height: 6px; background: var(--lilac-soft); animation-delay: -2.5s; }
+.motes i:nth-child(3) { right: 14%; top: -44px; width: 7px; height: 7px; background: var(--rose-soft); animation-delay: -5s; }
+/* ---- 对话流 ---- */
+.chatlog { display: flex; flex-direction: column; gap: 13px; margin-top: 24px; }
+.bubble { max-width: 88%; padding: 4px 2px; font-size: 15px; white-space: pre-wrap; word-break: break-word; }
+.bubble.user { align-self: flex-end; text-align: right; color: var(--ink-soft); font-size: 14px; }
+.bubble.user .who {
+  display: inline-block; font-size: 11px; color: var(--teal); background: var(--teal-faint);
+  border-radius: 999px; padding: 1px 9px; margin-bottom: 5px;
+}
+.bubble.ai { align-self: flex-start; background: var(--card-glass); border: 1px solid var(--line); border-radius: 4px 20px 22px 20px; padding: 12px 16px; box-shadow: var(--shadow-soft); }
+.bubble .bmeta { display: block; margin-top: 6px; font-size: 11px; color: var(--ink-faint); }
+.chatempty { color: var(--ink-faint); font-size: 14px; text-align: center; padding: 26px 0; }
+/* 空状态小插画位 */
+.emptyart { display: flex; justify-content: center; padding: 6px 0 2px; opacity: .9; }
+/* ---- 回忆/答案 ---- */
+.answer { margin-top: 16px; background: var(--teal-faint); border: 1px solid var(--line); border-radius: 6px 18px 18px 20px; padding: 14px 18px; }
+.answer .sources { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+.source { font-size: 12px; background: rgba(255,255,255,.7); border: 1px solid var(--line); border-radius: 7px; padding: 2px 8px; color: var(--ink-soft); }
+.source b { color: var(--ink); }
+.chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+/* ---- Drawer：实纸（v3修正：玻璃只给导航层，Drawer 是内容层，用实色） ---- */
+.scrim { position: fixed; inset: 0; background: rgba(50,70,68,.20); opacity: 0; pointer-events: none; transition: opacity .25s; z-index: 40; }
+.scrim.on { opacity: 1; pointer-events: auto; }
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(430px, 94vw); z-index: 41;
+  background: var(--sea);
+  border-left: 1px solid var(--line); box-shadow: -18px 0 50px rgba(70,130,122,.14);
+  transform: translateX(102%); transition: transform .3s cubic-bezier(.32,.72,.35,1);
+  display: flex; flex-direction: column;
+}
+.drawer.on { transform: none; }
+.drawer header { display: flex; gap: 6px; align-items: center; padding: 14px 16px 8px; flex-wrap: wrap; }
+.dtab { border: none; background: transparent; font: inherit; font-size: 13px; color: var(--ink-faint); padding: 7px 11px; border-radius: 999px; cursor: pointer; }
+.dtab.on { background: var(--ink); color: var(--sea); }
+.dclose { margin-left: auto; border: 1px solid var(--line); background: transparent; border-radius: 50%; width: 30px; height: 30px; cursor: pointer; color: var(--ink-soft); font-family: inherit; }
+.drawer .dbody { overflow-y: auto; padding: 6px 18px 30px; }
+.dpane { display: none; } .dpane.on { display: block; animation: fadein .25s; }
+@keyframes fadein { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; } }
+/* ---- 日晷签：记忆密度线。Drawer 顶部的细线，记忆创建时间打点。
+   灵动岛压缩信息 + 动森时间感。装饰为主，hover 显示数量。 ---- */
+.sundial { padding: 10px 2px 2px; }
+.sundial .rail { position: relative; height: 22px; border-bottom: 1px solid var(--line); }
+.sundial .tick { position: absolute; bottom: 0; width: 3px; border-radius: 2px; background: var(--teal); opacity: .55; }
+.sundial .tick.hypo { background: var(--lilac); }
+.sundial .cap { font-size: 10.5px; color: var(--ink-faint); margin-top: 3px; }
+/* ---- 按钮语言：Primary 深青墨 / Ghost 无框小工具 / Danger 柔红 ---- */
+.dtools button, .tools.ghosty button {
+  border: none; background: transparent; color: var(--ink-faint);
+  font-size: 12.5px; padding: 5px 9px;
+}
+.dtools button:hover, .tools.ghosty button:hover { color: var(--teal); background: var(--teal-faint); transform: none; }
+.memlist { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 9px; }
+.mem { background: var(--card-glass); border: 1px solid var(--line); border-radius: 12px 15px 13px 16px; padding: 10px 13px; display: flex; gap: 10px; align-items: flex-start; }
+.mem .when { font-size: 11px; color: var(--ink-faint); white-space: nowrap; min-width: 76px; padding-top: 3px; }
+.mem .desc { flex: 1; font-size: 13.5px; min-width: 0; word-break: break-word; }
+.mem .desc small { color: var(--ink-faint); display: block; margin-top: 3px; font-size: 11.5px; }
+.tag { font-size: 12px; background: var(--lilac-soft); border-radius: 7px; padding: 3px 9px; color: var(--ink-soft); }
+/* ---- 通用控件 ---- */
+button, .filebtn { font-family: inherit; font-size: 13px; border: 1px solid var(--line); background: rgba(255,255,255,.7); color: var(--ink); border-radius: 10px; padding: 7px 13px; cursor: pointer; transition: border-color .15s, transform .15s; }
+button:hover:not(:disabled) { border-color: var(--teal); transform: translateY(-1px); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.primary { background: var(--ink); border-color: var(--ink); color: var(--sea); }
+button.primary:hover:not(:disabled) { background: var(--teal); border-color: var(--teal); color: #fff; transform: translateY(-1px); }
+button.danger { color: var(--bad); }
+input[type=text], input:not([type]), input[type=password], input[type=url], select, video { font-family: inherit; }
+input[type=text], input:not([type]), input[type=password], input[type=url], select {
+  border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; font-size: 13.5px; background: rgba(255,255,255,.8); color: var(--ink); outline: none;
+}
+input:focus, select:focus { border-color: var(--teal); }
+.row { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; }
+.tools { margin: 8px 0; } .tools button { font-size: 12.5px; padding: 6px 11px; }
+.hint { font-size: 12.5px; color: var(--ink-faint); margin-top: 8px; }
+.hint.warn { color: var(--warn); }
+label.fld { font-size: 12.5px; color: var(--ink-soft); display: flex; gap: 8px; align-items: center; }
+video { width: 100%; max-height: 300px; border-radius: 12px; background: #000; margin-top: 10px; }
+.result { display: flex; gap: 12px; margin-top: 12px; }
+.result img { width: 120px; height: 88px; object-fit: cover; border-radius: 10px; background: var(--sea-deep); }
+.meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.verdict { margin-top: 8px; font-size: 13px; font-weight: 600; }
+.verdict.ok { color: var(--ok); } .verdict.no { color: var(--bad); }
+footer { text-align: center; color: var(--ink-faint); font-size: 11.5px; padding: 24px 0 28px; position: relative; z-index: 1; }
+.spin { display: inline-block; width: 13px; height: 13px; border: 2px solid var(--line); border-top-color: var(--teal); border-radius: 50%; animation: sp 1s linear infinite; vertical-align: -2px; margin-right: 6px; }
+@keyframes sp { to { transform: rotate(360deg); } }
+h2.ptitle { font-size: 14px; margin: 18px 0 4px; font-weight: 600; }
+h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; }
+.chip { font-size: 12px; padding: 5px 12px; border-radius: 999px; background: var(--teal-faint); border: 1px solid var(--line); color: var(--ink-soft); cursor: pointer; font-family: inherit; }
+.chip:hover { border-color: var(--teal); }
+.filebtn input[hidden] { display: none; }
+/* THEME 钩子：html[data-theme="xxx"] 覆盖变量即新主题。 */
 </style>
 </head>
 <body>
+<div class="sky"><div class="tide-a"></div><div class="tide-b"></div></div>
 
-<header>
-  <div class="brand">🧠 Personal AI <span class="ver">Core V0.2</span></div>
-  <div class="badges">
-    <span id="recBadge" class="badge">记录中</span>
-    <span id="evtBadge" class="badge muted">0 条记忆</span>
-    <span id="ctxBadge" class="badge muted">0 条理解</span>
-    <span id="modelBadge" class="badge muted">模型检查中…</span>
-  </div>
+<header class="topbar">
+  <span id="liveDot" class="dot" title="AI 状态"></span>
+  <span class="wordmark">Personal AI<small id="verTag">你的数字空间</small></span>
+  <span class="topsp"></span>
+  <span class="modeltag">模型 <b id="footModel">-</b> · <span id="modelBadge">检查中</span></span>
 </header>
 
-<main>
-  <!-- ① 观察 -->
-  <section class="card">
-    <h2>① 观察 <small>感知 → 理解 → 事件 → 记忆</small></h2>
-    <div class="row">
-      <button id="btnCamera">📷 打开摄像头</button>
-      <button id="btnShot" class="primary" disabled>拍照并观察</button>
-      <label class="filebtn">🖼️ 上传图片
-        <input type="file" id="fileInput" accept="image/*" hidden>
-      </label>
-      <button id="btnStopCam" hidden>关闭摄像头</button>
+<main class="space">
+  <section class="tide-hero" aria-hidden="true">
+    <div class="sunwrap"><div id="sunBody"></div><div id="sunLabel"></div></div>
+    <svg viewBox="0 0 720 300" preserveAspectRatio="xMidYMid slice">
+      <path class="wave1" fill="rgba(79,163,155,.14)" d="M0,190 C120,150 220,220 360,185 C500,150 600,200 720,170 L720,300 L0,300 Z"/>
+      <path class="wave2" fill="rgba(154,127,196,.13)" d="M0,225 C140,195 260,250 400,220 C540,190 620,235 720,210 L720,300 L0,300 Z"/>
+      <path class="wave3" fill="rgba(217,138,165,.10)" d="M0,258 C160,240 300,272 460,252 C580,238 660,260 720,250 L720,300 L0,300 Z"/>
+    </svg>
+    <div class="moon"></div>
+    <div class="leaf l1"></div><div class="leaf l2"></div><div class="leaf l3"></div>
+  </section>
+  <section class="greet">
+    <h1 id="greetWord">Good evening<span class="tint">.</span></h1>
+    <p>今天想做些什么？</p>
+    <div class="pills">
+      <button class="pill" data-open="memory">AI 记忆 <b id="ctxBadge">0</b></button>
+      <button class="pill" data-open="hypo">待验证 <b id="hypoBadge">0</b></button>
+      <button class="pill" data-open="history">回忆 <b id="evtBadge">0</b></button>
+      <button class="pill" data-open="weekly">过去 7 天</button>
     </div>
-    <video id="video" playsinline hidden></video>
-    <div id="camHint" class="hint warn" hidden></div>
-    <div id="observeHint" class="hint" hidden></div>
-    <div id="observeResult" class="result" hidden>
-      <img id="resultThumb" alt="场景缩略图">
-      <div class="eventbody">
-        <b id="evDesc"></b>
-        <div class="meta">
-          <span class="tag" id="evTime"></span>
-          <span class="tag" id="evScene"></span>
-          <span class="tag" id="evAct"></span>
-          <span class="tag" id="evImp"></span>
-        </div>
-        <div class="meta" id="evObjects"></div>
-        <div class="verdict" id="evVerdict"></div>
+  </section>
+
+  <div class="motes" aria-hidden="true"><i></i><i></i><i></i></div>
+  <section class="composer" id="composerBox">
+    <div class="box">
+      <textarea id="msgInput" rows="1" placeholder="和它说点什么，它会记住重要的事"></textarea>
+      <button id="btnSend" class="sendbtn" title="发送">↑</button>
+    </div>
+    <div class="hintline" id="chatHint" hidden></div>
+  </section>
+
+  <section id="chatLog" class="chatlog">
+    <div class="chatempty" id="chatEmpty">
+      <div class="emptyart" aria-hidden="true">
+        <svg width="180" height="86" viewBox="0 0 180 86">
+          <ellipse cx="90" cy="70" rx="62" ry="12" fill="rgba(79,163,155,.12)"/>
+          <path d="M40,66 C55,40 75,52 90,34 C105,52 125,40 140,66 C115,74 65,74 40,66 Z" fill="rgba(79,163,155,.14)"/>
+          <circle cx="90" cy="26" r="11" fill="rgba(217,138,165,.20)"/>
+          <circle cx="52" cy="52" r="5" fill="rgba(154,127,196,.22)"/>
+          <circle cx="130" cy="48" r="7" fill="rgba(154,127,196,.16)"/>
+        </svg>
       </div>
+      还没有对话。说点什么——重要的事会被记住，你随时可以纠正它。
     </div>
   </section>
 
-  <!-- ② 对话 -->
-  <section class="card">
-    <h2>② 对话 <small>带着“它对你的理解”聊天 · 每轮把新理解沉淀回去</small></h2>
-    <div id="chatLog" class="chatlog">
-      <div class="hint" id="chatEmpty">还没有对话。说点什么——你透露的信息会变成它对你的理解（可在 ④ 查看、修改、删除），你说的纠正会立刻改变它之后的判断。</div>
-    </div>
-    <div class="row" style="margin-top:10px">
-      <input id="msgInput" type="text" placeholder="例如：我不吃香菜 / 以后别直接给我答案，先给提示">
-      <button id="btnSend" class="primary">发送</button>
-    </div>
-    <div id="chatHint" class="hint" hidden></div>
-  </section>
-
-  <!-- ③ 回忆 -->
-  <section class="card">
-    <h2>③ 回忆 <small>从记忆库里检索并回答，附带依据</small></h2>
-    <div class="row">
-      <input id="qInput" type="text" placeholder="例如：刚才我在干什么？">
+  <section id="recallPane" hidden>
+    <div class="row" style="margin-top:22px">
+      <input id="qInput" type="text" placeholder="问问它记得什么，例如：刚才我在干什么？" style="flex:1">
       <button id="btnAsk" class="primary">提问</button>
     </div>
     <div class="chips">
@@ -194,104 +351,128 @@
       <div class="hint" id="ansMeta"></div>
     </div>
   </section>
-
-  <!-- ④ 它对你的理解（信任界面） -->
-  <section class="card">
-    <h2>④ 它对你的理解 <small>可查看 · 纠正 · 删除 · 暂停——你拥有对它的解释权</small></h2>
-    <div class="row tools">
-      <button id="btnCtxHistory">📜 变更历史</button>
-      <button id="btnCtxExport">⬇ 导出理解</button>
-      <button id="btnCtxRefresh">↻ 刷新</button>
-    </div>
-    <ul id="ctxList" class="memlist"></ul>
-    <div id="ctxEmpty" class="hint" hidden>还没有任何理解。去 ② 对个话，它才会开始懂你。</div>
-    <div id="ctxHistory" class="ctxhist" hidden></div>
-  </section>
-
-  <!-- ④′ 待验证假设（V0.3：AI 的猜测，不是事实） -->
-  <section class="card">
-    <h2>🔍 待验证假设 <small>AI 对你的猜测——它知道这只是猜测，你可以确认 · 否决 · 删除</small></h2>
-    <div class="row tools">
-      <button id="btnHypoRefresh">↻ 刷新</button>
-    </div>
-    <ul id="hypoList" class="memlist"></ul>
-    <div id="hypoEmpty" class="hint" hidden>还没有假设。等它从你的行为里看出重复的模式，才会谨慎地提一个——宁可少猜，不乱猜。</div>
-  </section>
-
-  <!-- ⑤ 记忆库 -->
-  <section class="card">
-    <h2>⑤ 记忆库 <small>你拥有它：可查看 · 删除 · 导出 · 暂停</small></h2>
-    <div class="row tools">
-      <button id="btnPause">⏸ 暂停记录</button>
-      <button id="btnExport">⬇ 导出 JSON</button>
-      <button id="btnClear" class="danger">🗑 清空全部</button>
-      <button id="btnRefresh">↻ 刷新</button>
-    </div>
-    <ul id="memList" class="memlist"></ul>
-    <div id="memEmpty" class="hint" hidden>还没有记忆。去 ① 里拍一张或传一张图试试。</div>
-  </section>
-
-  <!-- ⑤′ 过去7天（V0.5 Reflection：只读 digest，无按钮无交互） -->
-  <section class="card" id="weeklyCard" hidden>
-    <h2>📊 过去7天 <small>它整理好的理解，不是打扰——数字都可从数据推导</small></h2>
-    <div class="row tools">
-      <button id="btnWeeklyRefresh">↻ 刷新</button>
-    </div>
-    <ul id="weeklyList" class="memlist"></ul>
-    <div id="weeklyQ" class="hint" hidden></div>
-  </section>
-
-  <!-- ⑥ 模型设置（D009：模型可换，它对你的理解不换） -->
-  <section class="card">
-    <h2>⑥ 模型设置 <small>换模型不换"它"——Personal Context 与模型无关</small></h2>
-    <div class="hint" id="modelNow">当前正在使用：读取中…</div>
-    <div class="row" style="margin-top:10px">
-      <label class="fld">Provider
-        <select id="mdProvider">
-          <option value="ollama">本地 Ollama</option>
-          <option value="openai">云端 API（OpenAI-compatible）</option>
-        </select>
-      </label>
-    </div>
-    <div class="row" id="mdOllamaBox" style="margin-top:10px">
-      <input id="mdOllamaUrl" type="text" placeholder="Ollama 地址，如 http://127.0.0.1:11434">
-      <input id="mdOllamaModel" type="text" placeholder="模型名">
-    </div>
-    <div class="row" id="mdOpenaiBox" style="margin-top:10px" hidden>
-      <input id="mdBaseUrl" type="text" placeholder="API Base URL，如 https://api.siliconflow.cn/v1">
-      <input id="mdOpenaiModel" type="text" placeholder="模型名">
-      <input id="mdApiKey" type="password" placeholder="API Key（留空 = 不修改）" autocomplete="new-password">
-    </div>
-    <div class="row tools" style="margin-top:10px">
-      <button id="btnMdTest">🔌 测试连接</button>
-      <button id="btnMdSave" class="primary">💾 保存设置</button>
-    </div>
-    <div id="mdHint" class="hint" hidden></div>
-    <div class="hint">API Key 只保存在这台电脑的数据目录，不会写进代码、不会上传、不会明文显示。切换模型不会动你的记忆、对话和理解。</div>
-  </section>
-
-  <!-- ⑦ 数据与备份（阶段2） -->
-  <section class="card">
-    <h2>⑦ 数据与备份 <small>换电脑、换模型、换外壳——带上这个包，它还是那个它</small></h2>
-    <div class="row tools">
-      <button id="btnDataExport">⬇ 导出全部数据</button>
-      <button id="btnDataBackup">🛡 创建备份</button>
-      <label class="filebtn">📥 导入数据包
-        <input type="file" id="dataImport" accept=".zip" hidden>
-      </label>
-      <button id="btnDataRefresh">↻ 刷新备份</button>
-    </div>
-    <div class="hint" id="dataLoc">数据位置：读取中…</div>
-    <ul id="backupList" class="memlist"></ul>
-    <div id="backupEmpty" class="hint" hidden>还没有备份。点「创建备份」给现在的它拍张快照。</div>
-    <div id="dataHint" class="hint" hidden></div>
-    <div class="hint">卸载软件不会删除数据目录里的内容；恢复/导入前会自动给当前数据拍一张安全网备份。导出包内含模型设置（可能含 API Key），请自行妥善保管。</div>
-  </section>
 </main>
 
-<footer>本地运行 · 所有记忆只保存在这台电脑的 data/personal_ai.db · 模型服务：<span id="footModel">-</span></footer>
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer">
+  <header>
+    <button class="dtab on" data-pane="memory">记忆</button>
+    <button class="dtab" data-pane="hypo">待验证</button>
+    <button class="dtab" data-pane="history">回忆库</button>
+    <button class="dtab" data-pane="observe">观察</button>
+    <button class="dtab" data-pane="model">模型</button>
+    <button class="dtab" data-pane="data">数据</button>
+    <button class="dclose" id="drawerClose">×</button>
+  </header>
+  <div class="dbody">
+    <div class="dpane on" id="pane-memory">
+      <div class="sundial" id="sunDial" title="记忆密度"><div class="rail" id="sunRail"></div><div class="cap" id="sunCap"></div></div>
+      <h2 class="ptitle">它对你的理解 <small>可查看 · 纠正 · 删除——解释权在你</small></h2>
+      <div class="row tools ghosty">
+        <button id="btnCtxHistory">变更历史</button>
+        <button id="btnCtxExport">导出理解</button>
+        <button id="btnCtxRefresh">刷新</button>
+      </div>
+      <ul id="ctxList" class="memlist"></ul>
+      <div id="ctxEmpty" class="hint" hidden>还没有任何理解。去聊两句，它才会开始懂你。</div>
+      <div id="ctxHistory" class="ctxhist" hidden></div>
+      <h2 class="ptitle">过去 7 天 <small>整理好的理解，不是打扰</small></h2>
+      <section id="weeklyCard" hidden>
+        <div class="row tools ghosty"><button id="btnWeeklyRefresh">刷新</button></div>
+        <ul id="weeklyList" class="memlist"></ul>
+        <div id="weeklyQ" class="hint" hidden></div>
+      </section>
+    </div>
+    <div class="dpane" id="pane-hypo">
+      <h2 class="ptitle">待验证假设 <small>它的猜测，不是事实——可确认 · 否决 · 删除</small></h2>
+      <div class="row tools ghosty"><button id="btnHypoRefresh">刷新</button></div>
+      <ul id="hypoList" class="memlist"></ul>
+      <div id="hypoEmpty" class="hint" hidden>还没有假设。等它从你的行为里看出重复的模式，才会谨慎地提一个。</div>
+    </div>
+    <div class="dpane" id="pane-history">
+      <h2 class="ptitle">回忆库 <small>从记忆里检索并回答，附带依据</small></h2>
+      <ul id="memList" class="memlist"></ul>
+      <div id="memEmpty" class="hint" hidden>还没有记忆。</div>
+      <div class="row tools ghosty">
+        <button id="btnPause">暂停记录</button>
+        <button id="btnExport">导出 JSON</button>
+        <button id="btnClear" class="danger">清空全部</button>
+        <button id="btnRefresh">刷新</button>
+      </div>
+      <div class="hint"><span id="recBadge">记录中</span></div>
+    </div>
+    <div class="dpane" id="pane-observe">
+      <h2 class="ptitle">观察 <small>感知 → 理解 → 事件 → 记忆</small></h2>
+      <div class="row">
+        <button id="btnCamera">打开摄像头</button>
+        <button id="btnShot" class="primary" disabled>拍照并观察</button>
+        <label class="filebtn">上传图片<input type="file" id="fileInput" accept="image/*" hidden></label>
+        <button id="btnStopCam" hidden>关闭摄像头</button>
+      </div>
+      <video id="video" playsinline hidden></video>
+      <div id="camHint" class="hint warn" hidden></div>
+      <div id="observeHint" class="hint" hidden></div>
+      <div id="observeResult" class="result" hidden>
+        <img id="resultThumb" alt="场景缩略图">
+        <div class="eventbody">
+          <b id="evDesc"></b>
+          <div class="meta">
+            <span class="tag" id="evTime"></span>
+            <span class="tag" id="evScene"></span>
+            <span class="tag" id="evAct"></span>
+            <span class="tag" id="evImp"></span>
+          </div>
+          <div class="meta" id="evObjects"></div>
+          <div class="verdict" id="evVerdict"></div>
+        </div>
+      </div>
+    </div>
+    <div class="dpane" id="pane-model">
+      <h2 class="ptitle">模型 <small>换模型不换"它"</small></h2>
+      <div class="hint" id="modelNow">当前正在使用：读取中…</div>
+      <div class="row" style="margin-top:10px">
+        <label class="fld">Provider
+          <select id="mdProvider">
+            <option value="ollama">本地 Ollama</option>
+            <option value="openai">云端 API（OpenAI-compatible）</option>
+          </select>
+        </label>
+      </div>
+      <div class="row" id="mdOllamaBox" style="margin-top:10px">
+        <input id="mdOllamaUrl" type="text" placeholder="Ollama 地址">
+        <input id="mdOllamaModel" type="text" placeholder="模型名">
+      </div>
+      <div class="row" id="mdOpenaiBox" style="margin-top:10px" hidden>
+        <input id="mdBaseUrl" type="text" placeholder="API Base URL">
+        <input id="mdOpenaiModel" type="text" placeholder="模型名">
+        <input id="mdApiKey" type="password" placeholder="API Key（留空 = 不修改）" autocomplete="new-password">
+      </div>
+      <div class="row tools" style="margin-top:10px">
+        <button id="btnMdTest">测试连接</button>
+        <button id="btnMdSave" class="primary">保存设置</button>
+      </div>
+      <div id="mdHint" class="hint" hidden></div>
+    </div>
+    <div class="dpane" id="pane-data">
+      <h2 class="ptitle">数据与备份 <small>带上这个包，它还是那个它</small></h2>
+      <div class="row tools">
+        <button id="btnDataExport">导出全部数据</button>
+        <button id="btnDataBackup">创建备份</button>
+        <label class="filebtn">导入数据包<input type="file" id="dataImport" accept=".zip" hidden></label>
+        <button id="btnDataRefresh">刷新备份</button>
+      </div>
+      <div class="hint" id="dataLoc">数据位置：读取中…</div>
+      <ul id="backupList" class="memlist"></ul>
+      <div id="backupEmpty" class="hint" hidden>还没有备份。</div>
+      <div id="dataHint" class="hint" hidden></div>
+    </div>
+  </div>
+</aside>
+
+<footer>本地运行 · 记忆只在这台电脑 · Personal AI V0.5.4 Beta</footer>
 
 <script>
+
 const $ = (id) => document.getElementById(id);
 let camStream = null;
 
@@ -507,7 +688,7 @@ async function sendMsg() {
   $('msgInput').value = '';
   addBubble('user', text);
   const hint = $('chatHint');
-  show(hint); hint.className = 'hint';
+  show(hint); hint.className = 'hintline';
   hint.innerHTML = '<span class="spin"></span>思考中…（通常约 10 秒，本地模型首次加载可能稍久）';
   $('btnSend').disabled = true;
   try {
@@ -532,13 +713,13 @@ async function sendMsg() {
     loadContext(); loadHypos(); loadStatus();
   } catch (e) {
     hint.textContent = '❌ ' + e.message;
-    hint.className = 'hint warn';
+    hint.className = 'hintline warn';
   } finally {
     $('btnSend').disabled = false;
   }
 }
 $('btnSend').addEventListener('click', sendMsg);
-$('msgInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendMsg(); });
+$('msgInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); } });
 
 /* ---------- 它对你的理解（V0.2 信任界面） ---------- */
 const SRC_LABEL = { chat: '对话', observe: '观察', correction: '你的纠正', manual: '手动', system: '系统' };
@@ -865,6 +1046,161 @@ $('btnDataRefresh').addEventListener('click', loadDataInfo);
 /* ---------- 初始化 ---------- */
 loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadChatHistory(); loadModelSettings(); loadDataInfo();
 setInterval(loadStatus, 15000);
+
+
+/* ---------- Personal AI v1 补丁（展示层，不碰业务） ---------- */
+(function () {
+  // 问候语按时间 + 日期时段（真实时间，不伪造天气）
+  var nowD = new Date();
+  var h = nowD.getHours();
+  var w = h < 6 ? 'Good night.' : h < 12 ? 'Good morning.'
+    : h < 18 ? 'Good afternoon.' : 'Good evening.';
+  var gw = document.getElementById('greetWord');
+  if (gw) gw.textContent = w;
+  var seg = h < 6 ? '夜里' : h < 9 ? '早晨' : h < 12 ? '上午'
+    : h < 14 ? '中午' : h < 18 ? '下午' : h < 22 ? '晚上' : '深夜';
+  // 时间太阳：按小时定位（东→西）+ 变色（晨金→午白→暮粉橙→夜月蓝）
+  (function sun() {
+    var body = document.getElementById('sunBody');
+    var lab = document.getElementById('sunLabel');
+    if (!body) return;
+    var t = (h - 6) / 14;  // 6点→20点为白昼弧
+    var day = t >= 0 && t <= 1;
+    var x = day ? (t * 100) : 50, y = day ? (38 - Math.sin(t * Math.PI) * 30) : 30;
+    body.style.left = 'auto'; body.style.right = 'auto';
+    body.parentElement.style.position = 'absolute';
+    body.style.transform = 'translate(-50%,-50%)';
+    body.parentElement.style.left = x + '%'; body.parentElement.style.top = y + '%';
+    body.classList.toggle('night', !day);
+    body.classList.toggle('dusk', day && (h >= 16));
+    if (lab) {
+      var md = (nowD.getMonth() + 1) + '月' + nowD.getDate() + '日 · ' + seg;
+      lab.textContent = day ? md : md + ' · 夜';
+    }
+  })();
+  // 日晷签：记忆密度线（装饰为主，hover 显示数量）
+  var _lc = loadContext;
+  loadContext = async function () {
+    try { await _lc(); } catch (e) {}
+    try {
+      var rail = document.getElementById('sunRail');
+      var cap = document.getElementById('sunCap');
+      if (!rail) return;
+      var r = await api('/api/context');
+      var items = (r && r.items) || [];
+      var days = {};
+      items.forEach(function (e) {
+        var d = (e.date || '').slice(5) || '?';
+        days[d] = (days[d] || 0) + 1;
+      });
+      var keys = Object.keys(days).sort().slice(-14);
+      var mx = 1;
+      keys.forEach(function (k) { mx = Math.max(mx, days[k]); });
+      rail.innerHTML = keys.map(function (k, i) {
+        var hh = 4 + Math.round((days[k] / mx) * 16);
+        return '<span class="tick" style="left:' + (i * (100 / Math.max(keys.length, 1)))
+          + '%;height:' + hh + 'px" title="' + k + ' ' + days[k] + ' 条"></span>';
+      }).join('');
+      var hb = document.getElementById('hypoBadge');
+      if (cap) cap.textContent = items.length
+        ? ('共 ' + items.length + ' 条理解' + (hb && +hb.textContent ? ' · ' + hb.textContent + ' 条待验证' : ''))
+        : '还没有记忆，先聊两句';
+    } catch (e) {}
+  };
+  // 发送钮随输入变化：空=墨，非空=青（状态变化）
+  var ta0 = document.getElementById('msgInput');
+  var sb0 = document.getElementById('btnSend');
+  if (ta0 && sb0) ta0.addEventListener('input', function () {
+    sb0.style.background = ta0.value.trim() ? '' : '';
+    sb0.classList.toggle('ready', !!ta0.value.trim());
+  });
+  // Composer 生长
+  var ta = document.getElementById('msgInput');
+  if (ta) ta.addEventListener('input', function () {
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+  });
+  // Drawer
+  var drawer = document.getElementById('drawer');
+  var scrim = document.getElementById('scrim');
+  function openDrawer(pane) {
+    drawer.classList.add('on'); scrim.classList.add('on');
+    if (pane) switchPane(pane);
+  }
+  function closeDrawer() {
+    drawer.classList.remove('on'); scrim.classList.remove('on');
+  }
+  function switchPane(name) {
+    document.querySelectorAll('.dtab').forEach(function (t) {
+      t.classList.toggle('on', t.dataset.pane === name);
+    });
+    document.querySelectorAll('.dpane').forEach(function (p) {
+      p.classList.toggle('on', p.id === 'pane-' + name);
+    });
+  }
+  document.querySelectorAll('.dtab').forEach(function (t) {
+    t.addEventListener('click', function () { switchPane(t.dataset.pane); });
+  });
+  document.querySelectorAll('[data-open]').forEach(function (b) {
+    b.addEventListener('click', function () { openDrawer(b.dataset.open); });
+  });
+  document.getElementById('drawerClose').addEventListener('click', closeDrawer);
+  scrim.addEventListener('click', closeDrawer);
+  // 模型短名（全名太长只占地方，title 留全名）
+  var _ls = loadStatus;
+  loadStatus = async function () {
+    try { await _ls(); } catch (e) {}
+    try {
+      var fm = document.getElementById('footModel');
+      if (fm && fm.textContent && fm.textContent.indexOf('/') > -1) {
+        fm.title = fm.textContent;
+        fm.textContent = fm.textContent.split('/').pop().split(':')[0];
+      }
+    } catch (e) {}
+    var dot = document.getElementById('liveDot');
+    var mb = document.getElementById('modelBadge');
+    if (!dot || !mb) return;
+    var t = (mb.textContent || '');
+    dot.classList.toggle('off', /未知|异常/.test(t));
+    dot.classList.toggle('thinking', /慢/.test(t));
+    dot.title = t;
+  };
+  var _lh = loadHypos;
+  loadHypos = async function () {
+    try { await _lh(); } catch (e) {}
+    try {
+      var n = document.getElementById('hypoList')
+        .querySelectorAll('.mem').length;
+      var hb = document.getElementById('hypoBadge');
+      if (hb) hb.textContent = n;
+    } catch (e) {}
+  };
+  // 发送时 Composer 轻呼吸（生命感）
+  var _send = sendMsg;
+  sendMsg = async function () {
+    var c = document.getElementById('composerBox');
+    if (c) {
+      c.style.transform = 'scale(.995)';
+      setTimeout(function () { c.style.transform = ''; }, 180);
+    }
+    return _send();
+  };
+  // 用户气泡加"你"小标（装饰，不碰 addBubble 原函数）
+  var _add = addBubble;
+  addBubble = function (role, text, meta) {
+    _add(role, text, meta);
+    if (role !== 'user') return;
+    try {
+      var log = document.getElementById('chatLog');
+      var last = log.lastElementChild;
+      if (last && last.classList.contains('user')) {
+        var w = document.createElement('span');
+        w.className = 'who'; w.textContent = '你';
+        last.prepend(w);
+      }
+    } catch (e) {}
+  };
+})();
 </script>
 </body>
 </html>
