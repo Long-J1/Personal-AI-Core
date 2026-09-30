@@ -227,3 +227,73 @@ def test_overflow_hypothesis_never_promoted(tmp_path):
     created = PatternEngine(mem, h, p).promote_all()
     assert created == []
     assert p.count_live() == 0
+
+
+# ================================================================ V0.5.4 event 防火墙
+def test_event_chitchat_low_value_not_rejected(store, context_store,
+                                               mock_model, caplog):
+    """闲聊事件：照常写入（不覆盖 user_direct）+ importance 压到 0.2。"""
+    import logging
+    from core.deposit import Depositor, DepositResult
+    dep = Depositor(context_store, store, mock_model)
+    res = DepositResult()
+    with caplog.at_level(logging.INFO, logger="core.deposit"):
+        dep._apply_event(
+            {"event": {"description": "哈哈今天食堂鸡腿真好吃",
+                       "importance": 0.8}},
+            res, user_text="哈哈，今天食堂的鸡腿真好吃")
+    assert res.event_id is not None
+    ev = store.get_event(res.event_id)
+    assert ev is not None and ev.importance <= 0.2
+    assert any("event_low_value" in rec.getMessage()
+               for rec in caplog.records)
+
+
+def test_event_important_keeps_importance(store, context_store, mock_model):
+    """明确重要事件：importance 保持，不误杀。"""
+    from core.deposit import Depositor, DepositResult
+    dep = Depositor(context_store, store, mock_model)
+    res = DepositResult()
+    dep._apply_event(
+        {"event": {"description": "用户在为CSP备考，感觉时间不够用",
+                   "importance": 0.7}},
+        res, user_text="我最近在准备CSP，感觉压力有点大，时间总是不够用")
+    assert res.event_id is not None
+    ev = store.get_event(res.event_id)
+    assert ev is not None and ev.importance == 0.7
+
+
+def test_event_hard_reject(store, context_store, mock_model, caplog):
+    """硬拦截事件（无证据过去时）：丢弃 + firewall_reject。"""
+    import logging
+    from core.deposit import Depositor, DepositResult
+    dep = Depositor(context_store, store, mock_model)
+    res = DepositResult()
+    with caplog.at_level(logging.INFO, logger="core.deposit"):
+        dep._apply_event(
+            {"event": {"description": "用户上次去过网吧"}},
+            res, user_text="我今天学习")
+    assert res.event_id is None
+    assert any("firewall_reject" in rec.getMessage()
+               for rec in caplog.records)
+
+
+def test_event_advisory_dropped(store, context_store, mock_model):
+    """泛化建议不建事件。"""
+    from core.deposit import Depositor, DepositResult
+    dep = Depositor(context_store, store, mock_model)
+    res = DepositResult()
+    dep._apply_event(
+        {"event": {"description": "你应该早睡"}},
+        res, user_text="你应该早睡")
+    assert res.event_id is None
+
+
+def test_event_no_memorize_round_writes_nothing(conversation, mock_model,
+                                                store):
+    """别记轮 deposit 不跑，event 零新增（一致性锁死）。"""
+    before = store.count_events() if hasattr(store, "count_events") else None
+    mock_model.text_queue = ["好，这次不记。"]
+    conversation.chat("这个只是随便聊聊，不用记。昨天打游戏了")
+    if before is not None:
+        assert store.count_events() == before

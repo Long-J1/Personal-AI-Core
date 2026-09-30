@@ -117,6 +117,14 @@ PERSONALITY_WORDS = ("很懒", "很笨", "很聪明", "很乖",
 # 硬否决词：指向事实性错误 → rejected；其余显式否决（别/不要/纠正）
 # 属行为纠偏 → outdated（软否认）。子集须 ⊆ hypothesis_store.DENY_KEYWORDS。
 HARD_DENY_WORDS = ("不对", "不是", "没有", "错了", "胡说")
+
+# ---------- V0.5.4 event 防火墙：闲聊低价值标记（只降权，不拒绝）----------
+# 用户亲口说的真实 event 必须写入（user_direct 是事实来源，不可覆盖）；
+# 闲聊命中的只压 importance 到 0.2 + 日志，分量轻但不断供。
+CHITCHAT_PATTERNS = ("哈哈", "嘿嘿", "嗯嗯", "哦哦", "好吃", "好喝",
+                     "真香", "好次", "嘻嘻")
+CHITCHAT_MAX_CHARS = 20  # 去标点后短于此长度才可能是闲聊（防长句误伤）
+EVENT_LOW_IMPORTANCE = 0.2
 _DATE_CHARS = "年月日号"
 _DIGIT_CHARS = "0123456789一二三四五六七八九十百千万"
 _WEEK_TAIL = "一二三四五六日天末"
@@ -278,6 +286,18 @@ def _is_personality_judgment(text: str) -> bool:
     if any(w in text for w in PERSONALITY_WORDS):
         return True
     return "是个" in text and "的人" in text
+
+
+def _is_chitchat_event(description: str) -> bool:
+    """闲聊启发式：短 + 含闲聊模式 → 低价值（只降权，不断供）。
+
+    注意：这是"分量"判断不是"真假"判断——用户亲口说的鸡腿是真的，
+    只是不值得高分。误伤案例进 D019 附录。
+    """
+    t = _norm_text(description or "")
+    if not t or len(t) >= CHITCHAT_MAX_CHARS:
+        return False
+    return any(p in (description or "") for p in CHITCHAT_PATTERNS)
 
 
 def classify_source(content, user_text, entries, store, kind=""):
@@ -445,7 +465,7 @@ class Depositor:
         self._apply_corrections(data, alias_map, result, user_text)
         if grounded:
             self._apply_creates(data, result, user_text, entries)
-            self._apply_event(data, result)
+            self._apply_event(data, result, user_text, entries)
         else:
             # 无依据提问门：new[] 全数拦下，动作同样可审计（firewall_reject）
             for item in (data.get("new") or []):
@@ -673,17 +693,39 @@ class Depositor:
             return
         log.info("quota_overflow [%s] 转假设待验证：%s", kind, text[:40])
 
-    def _apply_event(self, data: dict, result: DepositResult) -> None:
+    def _apply_event(self, data: dict, result: DepositResult,
+                     user_text: str = "", entries=None) -> None:
+        """对话沉淀事件（V0.5.4：统一 firewall 入口）。
+
+        规则（与 context 同源，`classify_source`）：
+        reject/advisory → 丢弃 + firewall_reject 日志，不建 hypothesis
+        （事件不是事实主张，无待验证价值）；
+        闲聊命中 → 正常写入 + importance 压到 0.2（低价值不断供）；
+        其余照常。问句轮到不了这里（grounded 门在 deposit 层拦）。
+        别记轮到不了这里（deposit 整体跳过）。
+        """
         ev = data.get("event")
         if not isinstance(ev, dict):
             return
         description = str(ev.get("description") or "").strip()[:300]
         if not description:
             return
+        grade, why = classify_source(description, user_text, entries,
+                                     self.store)
+        if grade == "reject":
+            log.info("firewall_reject [event:%s]：%s", why, description[:60])
+            return
+        if grade == "advisory":
+            log.info("泛化建议不建事件：%s", description[:60])
+            return
         try:
             importance = float(ev.get("importance", 0.5))
         except (TypeError, ValueError):
             importance = 0.5
+        if _is_chitchat_event(description):
+            importance = min(importance, EVENT_LOW_IMPORTANCE)
+            log.info("event_low_value [%s]：%s",
+                     grade, description[:60])
         event = Event(
             source="chat",
             scene=str(ev.get("scene") or "")[:80],
