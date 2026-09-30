@@ -54,7 +54,7 @@ class Settings:
     # 日志
     log_level: str = os.environ.get("PAI_LOG_LEVEL", "INFO")
 
-    version: str = "0.2.0"
+    version: str = "0.5.4"
 
 
 settings = Settings()
