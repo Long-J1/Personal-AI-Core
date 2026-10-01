@@ -446,7 +446,7 @@ class HypothesisStore:
                 return True
             hit = con.execute(
                 "SELECT id FROM hypothesis_log WHERE id=? AND action IN"
-                " ('reject', 'verify_confirm')",
+                " ('reject', 'verify_confirm', 'change')",
                 (source_id,),
             ).fetchone()
             return bool(hit)
@@ -862,6 +862,159 @@ class HypothesisStore:
     def independent_support_count(self, hypo_id: str) -> int:
         """公开版独立源计数（verifier 选人用）"""
         return self._independent_origins(hypo_id)
+
+    # ---------- V0.5.6 自然证据（用户主动说出来的话）----------
+    # 复用既有 correction 来源机制：不新增 source_type，只写一条真实的
+    # hypothesis_log，它的 id 就是合法证据来源，可追溯到用户原话。
+    @staticmethod
+    def _natural_eligible(status: str, scope: str) -> bool:
+        """自然证据只能碰 live 且可验证的假设。
+
+        rejected / deleted 不可复活；quota_overflow 是 V0.5.3 设的安全
+        边界（不可验证、不可晋级、不可自然确认），这里一并挡住。
+        """
+        if status not in ("tentative", "confirmed"):
+            return False
+        if (scope or "").startswith("quota_overflow:"):
+            return False
+        return True
+
+    def _natural_eligible_check(self, hypo_id: str) -> bool:
+        with closing(self._connect()) as con:
+            row = con.execute(
+                "SELECT status, scope FROM hypotheses WHERE id=?", (hypo_id,),
+            ).fetchone()
+        return bool(row) and self._natural_eligible(row["status"],
+                                                    row["scope"])
+
+    def record_natural_evidence(
+        self,
+        hypo_id: str,
+        user_text: str,
+        signal: str,
+        *,
+        superseded_entry_id: str = "",
+    ) -> bool:
+        """用户自然表达 → 假设证据。
+
+        support：走 add_evidence 的统计路径（+0.08），但**不改 status**——
+                 用户说一句"对"不等于这条理解已被验证，更不等于可以
+                直接晋级成 Pattern（晋级门槛不变）。
+        deny：   话题强相关时走既有 reject()（置 0.25 + rejected + 规律级联）。
+        change：只吃反证（-0.25），**不改 status**——用户可能只是暂时
+                变了，不能把旧理解永久判死；历史完整保留可追溯。
+        deny_weak：话题只有弱相关时用，只吃反证。否决是不可逆的，
+                证据不足时绝不能用它；降权是安全的。
+        """
+        user_text = (user_text or "").strip()[:200]
+        if not user_text:
+            return False
+        if signal == "support":
+            return self._natural_support(hypo_id, user_text)
+        if signal == "deny":
+            # reject() 自己只挡 deleted/rejected；这里必须补一道，
+            # 否则 quota_overflow 这类"不可验证"的假设能被自然否定，
+            # 还会顺着 reject 的级联打到 pattern——绕过了 V0.5.3 的边界。
+            if not self._natural_eligible_check(hypo_id):
+                return False
+            return self.reject(hypo_id, user_text, channel="natural")
+        if signal == "change":
+            return self._natural_contradict(
+                hypo_id, user_text, superseded_entry_id or None,
+                log_action="change", channel="natural_change")
+        if signal == "deny_weak":
+            return self._natural_contradict(
+                hypo_id, user_text, superseded_entry_id or None,
+                log_action="change", channel="natural_deny")
+        return False
+
+    @staticmethod
+    def _natural_log_id(hypo_id: str, user_text: str, now) -> str:
+        """自然证据的确定性 log id。
+
+        来源 id 必须可复现，否则同一句话重复说会每次生成新行，
+        add_evidence 的去重索引就抓不住，support_count 会凭空翻倍。
+        口径与既有 origin 一致：同一条陈述、同一天 = 同一个来源；
+        换了说法或跨天 = 新的独立来源。
+        """
+        norm = "".join(ch for ch in (user_text or "")
+                       if not ch.isspace() and ch not in "，。！？、；：,.!?;:~…—")
+        day = now.strftime("%Y-%m-%d")
+        return uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"personal-ai:natural:{hypo_id}:{day}:{norm}",
+        ).hex
+
+    def _natural_support(self, hypo_id: str, user_text: str) -> bool:
+        now = _now()
+        with self._lock, closing(self._connect()) as con:
+            row = con.execute(
+                "SELECT status, scope FROM hypotheses WHERE id=?", (hypo_id,),
+            ).fetchone()
+            if not row or not self._natural_eligible(row["status"],
+                                                      row["scope"]):
+                return False
+            log_id = self._natural_log_id(hypo_id, user_text, now)
+            with con:
+                con.execute(
+                    "INSERT OR IGNORE INTO hypothesis_log (id, epoch, iso,"
+                    " action, hypothesis_id, conf_before, conf_after, detail)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (log_id, now.timestamp(), now.isoformat(),
+                     "verify_confirm", hypo_id, None, None,
+                     json.dumps({"answer": user_text, "channel": "natural",
+                                 "signal": "support"}, ensure_ascii=False)),
+                )
+        ok, err = self.add_evidence(
+            hypo_id, "support", "correction", log_id,
+            origin=f"natural:{log_id}", excerpt=user_text,
+            detail={"channel": "natural", "signal": "support"},
+        )
+        if not ok:
+            log.warning("自然支持证据落链失败（跳过）：%s", err)
+            return False
+        log.info("假设 %s 收到用户自然支持（+%.2f）",
+                 hypo_id[:8], SUPPORT_DELTA)
+        return True
+
+    def _natural_contradict(self, hypo_id: str, user_text: str,
+                            superseded_entry_id: str | None, *,
+                            log_action: str, channel: str) -> bool:
+        """只吃反证、不动 status。可逆动作的统一落点（变化 / 弱否定）。"""
+        now = _now()
+        with self._lock, closing(self._connect()) as con:
+            row = con.execute(
+                "SELECT status, scope, confidence FROM hypotheses WHERE id=?",
+                (hypo_id,),
+            ).fetchone()
+            if not row or not self._natural_eligible(row["status"],
+                                                      row["scope"]):
+                return False
+            source_id = superseded_entry_id
+            if not source_id:
+                # 无对应 Context 可追溯时，用本次用户行为本身作为来源。
+                # id 同样确定性生成：同一条陈述同一天重复出现算一次反证。
+                source_id = self._natural_log_id(hypo_id, user_text, now)
+                with con:
+                    con.execute(
+                        "INSERT OR IGNORE INTO hypothesis_log (id, epoch, iso, action,"
+                        " hypothesis_id, conf_before, conf_after, detail)"
+                        " VALUES (?,?,?,?,?,?,?,?)",
+                        (source_id, now.timestamp(), now.isoformat(),
+                         log_action, hypo_id, row["confidence"], None,
+                         json.dumps({"excerpt": user_text, "channel": channel},
+                                    ensure_ascii=False)),
+                    )
+        ok, err = self.add_evidence(
+            hypo_id, "contradict", "correction", source_id,
+            excerpt=user_text, detail={"channel": channel},
+        )
+        if not ok:
+            log.warning("自然反证落链失败（跳过）：%s", err)
+            return False
+        log.info("假设 %s 收到%s信号（降权 %.2f，状态保留）",
+                 hypo_id[:8], channel, CONTRADICT_DELTA)
+        return True
 
     # ---------- 删除 / 恢复 ----------
     def delete_entry(self, hypo_id: str) -> bool:

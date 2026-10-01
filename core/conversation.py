@@ -592,13 +592,32 @@ class ConversationService:
                 except Exception as exc:
                     log.warning("规律使用计数失败（跳过）：%s", exc)
             # 沉淀（模型调用，5~9s）
+            result: DepositResult | None = None
             try:
-                result: DepositResult = self.depositor.deposit(
+                result = self.depositor.deposit(
                     message, model_answer, entries)
                 deposit = result.to_dict()
             except Exception as exc:
                 log.error("后台沉淀异常（跳过）：%s", exc)
                 deposit = {"error": f"沉淀异常，已跳过：{exc}"}
+            # 自然证据 / 变化信号（V0.5.6）
+            # 位置：沉淀之后、归纳之前——此时本轮 Context 已落库，
+            # 归纳尚未跑（不会给本轮刚冒出来的假设倒灌证据，更保守）。
+            try:
+                from .natural_bridge import apply_natural_signal
+
+                natural = apply_natural_signal(
+                    self.ctx, self.hyp, message,
+                    exclude_entry_ids=[e.get("id") for e
+                                       in (result.created or [])],
+                ) if result is not None else {}
+                if natural.get("hypo_ids") or natural.get("entry_ids"):
+                    log.info("自然信号 %s：假设 %d / 理解 %d",
+                             natural.get("signal"),
+                             len(natural.get("hypo_ids") or []),
+                             len(natural.get("entry_ids") or []))
+            except Exception as exc:
+                log.warning("自然证据接线失败（跳过，不影响对话）：%s", exc)
             # 归纳
             try:
                 induced = self.inducer.induce_all()

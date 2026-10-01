@@ -239,8 +239,17 @@ def main() -> int:
         for f, t in srcs.items():
             for bad in ("threading.Timer", "setInterval", "toast", "push(",
                         "Notification", "schedule", "notify("):
-                if bad in t:
-                    fail(f"{f} 含主动设施痕迹：{bad}")
+                if bad not in t:
+                    continue
+                # "schedule" 作子串会误伤 V0.5.5 性能改造引入的
+                # _schedule_deposit——那是"用户发消息后才启动"的后台任务
+                # 调度器，与本步要禁止的主动设施（定时器/通知）正好相反。
+                # 这里只豁免这一个方法名，其余任何 schedule 仍然判失败。
+                if bad == "schedule":
+                    residue = t.replace("_schedule_deposit", "")
+                    if "schedule" not in residue:
+                        continue
+                fail(f"{f} 含主动设施痕迹：{bad}")
         ok("沉默保持 + 周报 + 无主动设施")
 
     print("\nV0.5 全部验收步骤通过")
