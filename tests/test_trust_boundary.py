@@ -114,9 +114,13 @@ def test_t2_correction_attack_roots_out_old_entry(conversation,
         deposit_json(new=[{"kind": "fact", "content": "用户喜欢喝咖啡"}]),
     ]
     r1 = conversation.chat("我喜欢喝咖啡。")
-    created = r1.deposit["created"]
-    assert created and created[0]["content"] == "用户喜欢喝咖啡"
-    old_id = created[0]["id"]
+    # 第二阶段：deposit 后台执行，请求内不可见；等待后从 DB 验证
+    assert r1.deposit is None
+    import time as _t; _t.sleep(12)
+    items = context_store.list_entries()
+    created = [e for e in items if e.content == "用户喜欢喝咖啡"]
+    assert created, "轮1理解未入库"
+    old_id = created[0].id
     old = context_store.get_entry(old_id)
     assert old.source_grade == "user_direct" and old.confidence == 0.95
 
@@ -203,7 +207,9 @@ def test_t3_correction_with_jiucuo_still_writes(conversation,
         deposit_json(new=[{"kind": "profile", "content": "用户是高二学生"}]),
     ]
     r = conversation.chat("别记错，我是高二的")
-    assert r.deposit is not None
+    # 第二阶段：deposit 后台执行，请求内不可见；等待后从 DB 验证
+    assert r.deposit is None
+    import time as _t; _t.sleep(12)
     assert context_store.count_active() == 1
 
 

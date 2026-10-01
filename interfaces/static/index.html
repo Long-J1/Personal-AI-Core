@@ -121,7 +121,11 @@ body > .shell { flex: 1; min-height: 0; display: flex; flex-direction: row; }
 .dock { flex: none; padding: 6px 0 4px; background: linear-gradient(transparent, var(--sea) 30%); }
 .dockfoot { text-align: center; color: var(--ink-faint); font-size: 10.5px; padding: 5px 0 3px; }
 /* ---- 视觉主体：潮汐。Home 的重心，大幅柔和抽象，三层缓漂 ---- */
-.tide-hero { position: relative; margin: 6px -22px 0; height: 260px; overflow: hidden; }
+/* 潮汐：宽度老实待在 scrollzone 的内容盒里。
+   曾经用 margin: 0 -22px 去抵消 .space 的 padding 做成"出血"，
+   结果它比滚动容器宽 44px → 恒定 22px 横向溢出（与聊天内容无关），
+   横向滚动条正好压在 Composer 上方。现在不靠负 margin 撑破父容器。 */
+.tide-hero { position: relative; margin: 6px 0 0; height: 260px; overflow: hidden; }
 .tide-hero svg { position: absolute; inset: 0; width: 100%; height: 100%; filter: blur(14px); opacity: .85; }
 .tide-hero .wave1 { animation: drift1 11s ease-in-out infinite alternate; }
 .tide-hero .wave2 { animation: drift2 14s ease-in-out infinite alternate; }
@@ -227,8 +231,14 @@ body > .shell { flex: 1; min-height: 0; display: flex; flex-direction: row; }
 .motes i:nth-child(2) { left: 12%; top: -52px; width: 6px; height: 6px; background: var(--lilac-soft); animation-delay: -2.5s; }
 .motes i:nth-child(3) { right: 14%; top: -44px; width: 7px; height: 7px; background: var(--rose-soft); animation-delay: -5s; }
 /* ---- 对话流 ---- */
-.chatlog { display: flex; flex-direction: column; gap: 13px; margin-top: 24px; }
-.bubble { max-width: 88%; padding: 4px 2px; font-size: 15px; white-space: pre-wrap; word-break: break-word; }
+/* 宽度纪律：气泡永远不宽于容器，长内容在气泡内部自己换行或局部滚动，
+   绝不把滚动区撑宽。min-width:0 是 flex 子项能收缩的前提。 */
+.chatlog { display: flex; flex-direction: column; gap: 13px; margin-top: 24px; min-width: 0; }
+.bubble {
+  max-width: min(88%, 100%); min-width: 0;
+  padding: 4px 2px; font-size: 15px;
+  white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+}
 .bubble.user { align-self: flex-end; text-align: right; color: var(--ink-soft); font-size: 14px; }
 .bubble.user .who {
   display: inline-block; font-size: 11px; color: var(--teal); background: var(--teal-faint);
@@ -236,6 +246,39 @@ body > .shell { flex: 1; min-height: 0; display: flex; flex-direction: row; }
 }
 .bubble.ai { align-self: flex-start; background: var(--card-glass); border: 1px solid var(--line); border-radius: 4px 20px 22px 20px; padding: 12px 16px; box-shadow: var(--shadow-soft); }
 .bubble .bmeta { display: block; margin-top: 6px; font-size: 11px; color: var(--ink-faint); }
+/* ---- 内容级防溢出：长代码 / 表格 / 图片 / 超长词 ----
+   原则：优先自动换行；确实不该换的（代码、表格）用**局部**滚动，
+   不让它们去撑破滚动容器。max-width:100% 是所有内联块的底线。 */
+.bubble :is(pre, code, table, img, video, iframe, svg) { max-width: 100%; }
+.bubble img, .bubble video { height: auto; display: block; border-radius: 10px; }
+.bubble pre {
+  overflow-x: auto; overflow-y: hidden; white-space: pre;
+  margin: 8px 0; padding: 10px 12px; border-radius: 10px;
+  background: var(--sea-deep); border: 1px solid var(--line);
+  font-size: 13px; line-height: 1.5;
+}
+.bubble pre code { display: block; white-space: pre; background: none; padding: 0; border: none; }
+.bubble table { display: block; overflow-x: auto; border-collapse: collapse; margin: 8px 0; }
+.bubble :is(th, td) { border: 1px solid var(--line); padding: 5px 9px; font-size: 13px; white-space: nowrap; }
+.bubble blockquote { margin: 8px 0; padding: 2px 0 2px 12px; border-left: 3px solid var(--line); color: var(--ink-soft); }
+/* ---- 处理摘要：内部判断不进正文。原生 details，默认收起 ----
+   只放产品化的"做了哪几步"，不暴露 approach / deposit / 分类等内部字段。 */
+.bubble .trace { margin-top: 9px; font-size: 12px; color: var(--ink-faint); }
+.bubble .trace summary {
+  cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: 5px;
+  width: fit-content; padding: 2px 9px 2px 7px; border-radius: 999px;
+  background: var(--teal-faint); color: var(--ink-faint);
+}
+.bubble .trace summary::-webkit-details-marker { display: none; }
+.bubble .trace summary::before { content: "▸"; font-size: 9px; line-height: 1; transition: transform .18s; }
+.bubble .trace[open] summary::before { transform: rotate(90deg); }
+.bubble .trace summary:hover { color: var(--teal); }
+.bubble .trace ul { margin: 7px 0 0; padding-left: 4px; list-style: none; }
+.bubble .trace li { position: relative; padding-left: 15px; margin: 3px 0; }
+.bubble .trace li::before {
+  content: ""; position: absolute; left: 3px; top: 8px;
+  width: 4px; height: 4px; border-radius: 50%; background: var(--teal); opacity: .6;
+}
 .chatempty { color: var(--ink-faint); font-size: 14px; text-align: center; padding: 26px 0; }
 /* 空状态小插画位 */
 .emptyart { display: flex; justify-content: center; padding: 6px 0 2px; opacity: .9; }
@@ -260,7 +303,7 @@ body > .shell { flex: 1; min-height: 0; display: flex; flex-direction: row; }
 .dtab { border: none; background: transparent; font: inherit; font-size: 13px; color: var(--ink-faint); padding: 7px 11px; border-radius: 999px; cursor: pointer; }
 .dtab.on { background: var(--ink); color: var(--sea); }
 .dclose { margin-left: auto; border: 1px solid var(--line); background: transparent; border-radius: 50%; width: 30px; height: 30px; cursor: pointer; color: var(--ink-soft); font-family: inherit; }
-.drawer .dbody { overflow-y: auto; padding: 6px 18px 30px; }
+.drawer .dbody { overflow-y: auto; overflow-x: hidden; padding: 6px 18px 30px; min-width: 0; }
 .dpane { display: none; } .dpane.on { display: block; animation: fadein .25s; }
 @keyframes fadein { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; } }
 /* ---- 日晷签：记忆密度线。Drawer 顶部的细线，记忆创建时间打点。
@@ -295,6 +338,8 @@ input[type=text], input:not([type]), input[type=password], input[type=url], sele
 }
 input:focus, select:focus { border-color: var(--teal); }
 .row { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; }
+/* flex 子项默认 min-width:auto，长输入会把行撑宽 —— 一律允许收缩到 0 */
+.row > input, .row > select, .row > button { min-width: 0; }
 .tools { margin: 8px 0; } .tools button { font-size: 12.5px; padding: 6px 11px; }
 .hint { font-size: 12.5px; color: var(--ink-faint); margin-top: 8px; }
 .hint.warn { color: var(--warn); }
@@ -566,19 +611,26 @@ async function loadStatus() {
     $('evtBadge').textContent = s.events + ' 条记忆';
     $('ctxBadge').textContent = (s.context_entries ?? 0) + ' 条理解';
     const ok = s.model_service_ok;
+    // status 已改为纯本地读"最近一次真实调用"的结果，不再联网探测。
+    // 所以 false 的意思是"上次真调用失败了"，不是"慢"。
     if (ok === true) {
       $('modelBadge').textContent = '模型在线';
       $('modelBadge').className = 'badge';
     } else if (ok === false) {
-      // False 不一定是真离线：status 的 ping 限死 0.8s，云端走代理慢了也会 False
-      $('modelBadge').textContent = '模型响应慢';
+      $('modelBadge').textContent = '模型不可用';
       $('modelBadge').className = 'badge off';
     } else {
       $('modelBadge').textContent = '模型状态未知';
       $('modelBadge').className = 'badge off';
     }
-    $('modelBadge').title = s.model_service_ms != null
-      ? `ping 耗时约 ${s.model_service_ms}ms（>800ms 会显示“响应慢”，不影响实际对话）` : '';
+    let tip = '';
+    if (s.model_service_detail) tip += s.model_service_detail;
+    if (s.model_service_ms != null)
+      tip += `${tip ? '\\n' : ''}上次真实调用耗时约 ${s.model_service_ms}ms`;
+    if (s.model_service_checked_at)
+      tip += `${tip ? '\\n' : ''}记录于 ${new Date(s.model_service_checked_at * 1000).toLocaleTimeString()}`;
+    if (!tip) tip = '还没有做过真实调用，发一句话试试';
+    $('modelBadge').title = tip;
     $('footModel').textContent = s.model;
     $('btnPause').textContent = s.paused ? '▶ 恢复记录' : '⏸ 暂停记录';
   } catch (e) {
@@ -748,36 +800,101 @@ async function loadChatHistory() {
   } catch (e) { /* 静默 */ }
 }
 
+/* 处理摘要：内部判断的可折叠替代品。
+   只写"做了哪几步"这种产品化措辞；不出现 approach / deposit / 分类 /
+   hypothesis / correction 这类内部字段名，也不放模型原始推理链。 */
+function buildTrace(reply) {
+  const r = reply || {};
+  const box = document.createElement('details');
+  box.className = 'trace';
+  const head = document.createElement('summary');
+  head.textContent = '处理摘要';
+  box.appendChild(head);
+
+  const steps = ['已分析你的问题'];
+  const memN = (r.context_used || []).length;
+  steps.push(memN > 0
+    ? '已参考你此前的 ' + memN + ' 条相关记忆'
+    : '本次没有用到过往记忆');
+  if (r.paused) steps.push('当前处于暂停状态，本次未记录');
+  steps.push('已完成回答');
+
+  const ul = document.createElement('ul');
+  steps.forEach(t => {
+    const li = document.createElement('li');
+    li.textContent = t;
+    ul.appendChild(li);
+  });
+  box.appendChild(ul);
+  return box;
+}
+
 async function sendMsg() {
   const text = $('msgInput').value.trim();
   if (!text) return;
   $('msgInput').value = '';
+  $('msgInput').style.height = 'auto';
   addBubble('user', text);
   const hint = $('chatHint');
   show(hint); hint.className = 'hintline';
-  hint.innerHTML = '<span class="spin"></span>思考中…（通常约 10 秒，本地模型首次加载可能稍久）';
+  hint.innerHTML = '<span class="spin"></span>思考中…';
   $('btnSend').disabled = true;
+  const empty = $('chatEmpty');
+  if (empty) empty.remove();
+  const div = document.createElement('div');
+  div.className = 'bubble ai';
+  div.textContent = '';
+  $('chatLog').appendChild(div);
+  const follow = () => {
+    const sz = document.getElementById('scrollZone');
+    if (sz && window.__paiNearBottom !== false) sz.scrollTop = sz.scrollHeight;
+  };
+  let full = '', finalReply = null, firstAt = 0;
+  const t0 = Date.now();
   try {
-    const r = await api('/api/conversation', {
+    const res = await fetch('/api/conversation/stream', {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: text, session_id: chatSession }),
     });
-    chatSession = r.session_id;
-    let meta = '判断：' + (r.approach || []).join('；');
-    if (r.deposit) {
-      const d = r.deposit, parts = [];
-      if ((d.created || []).length) parts.push('学到 ' + d.created.length + ' 条新理解');
-      if ((d.corrected || []).length) parts.push('按你的纠正更新 ' + d.corrected.length + ' 条');
-      if (d.event_id) parts.push('记入事件记忆');
-      if (d.error) parts.push('沉淀跳过：' + d.error);
-      if (parts.length) meta += ' · ' + parts.join(' · ');
-    } else if (r.paused) {
-      meta += ' · ⏸ 暂停中（本次未沉淀）';
+    if (!res.ok) throw new Error('服务异常(' + res.status + ')');
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const rd = await reader.read();
+      if (rd.done) break;
+      buf += dec.decode(rd.value, { stream: true });
+      const parts = buf.split('\n\n');
+      buf = parts.pop();
+      for (const part of parts) {
+        const line = part.trim();
+        if (line.indexOf('data:') !== 0) continue;
+        let ev;
+        try { ev = JSON.parse(line.slice(5)); } catch (e) { continue; }
+        if (ev.delta) {
+          if (!firstAt) { firstAt = Date.now(); hint.hidden = true; }
+          full += ev.delta;
+          div.textContent = full;
+          follow();
+        } else if (ev.done && ev.reply) {
+          finalReply = ev.reply;
+        } else if (ev.error) {
+          throw new Error(ev.error);
+        }
+      }
     }
-    addBubble('ai', r.answer, meta);
+    const r = finalReply || {};
+    chatSession = r.session_id || chatSession;
+    // 正文只有回答本身。approach / deposit / 分类 / 字段名一律不进正文，
+    // 收进默认收起的"处理摘要"（只讲做了哪几步，不讲内部怎么判的）。
+    div.textContent = r.answer || full;
+    div.appendChild(buildTrace(r));
     hint.hidden = true;
     loadContext(); loadHypos(); loadStatus();
+    window.__paiTTFT = firstAt ? (firstAt - t0) : 0;
   } catch (e) {
+    div.remove();
     hint.textContent = '❌ ' + e.message;
     hint.className = 'hintline warn';
   } finally {

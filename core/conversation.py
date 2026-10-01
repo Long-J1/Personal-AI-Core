@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -153,6 +154,7 @@ class ConversationService:
         hypothesis_store: HypothesisStore | None = None,
         pattern_store: PatternStore | None = None,
         goal_store: GoalStore | None = None,
+        service_state=None,
     ):
         from memory.chat_store import ChatStore  # 局部导入避免循环
 
@@ -171,10 +173,40 @@ class ConversationService:
                                    pattern_store=self.pat)
         self.inducer = Inducer(store, context_store, self.hyp)
         self.promoter = PatternEngine(store, self.hyp, self.pat)
+        # ---- 异步沉淀基础设施（第二阶段：Memory 后台化）----
+        # _deposit_tasks: 正在后台跑的沉淀任务引用（防 GC）
+        # _deposit_dedup: 已调度/正在跑的消息哈希（sha256 前 16 字符）
+        # _deposit_lock: 保护去重集合的并发访问
+        self._deposit_tasks: set = set()
+        self._deposit_dedup: set = set()
+        self._deposit_lock = None  # asyncio.Lock 在首次 async 调用时创建
+        self._loop = None          # 创建后台任务的 event loop（线程池侧投递等待用）
+        self._deposit_wait_timeout = 15.0  # 等待后台沉淀的上限（秒），超时继续对话
+        # ---- 服务状态缓存（status 去联网）----
+        # 真实调用成功/失败写这里，/api/status 只读不联网。
+        from .service_state import default_service_state
+        self._svc = service_state or default_service_state()
         # 话题命中复用回忆的检索级联（D003；模型只是构造需要，不参与检索）
         from .context import Recaller
 
         self._recaller = Recaller(store, model, settings=self.settings)
+
+    # ---------- 服务状态：只记真实调用，不记探测 ----------
+    def _mark_service(self, ok: bool, *, elapsed_ms: int | None = None,
+                      detail: str | None = None) -> None:
+        """把一次**真实回答调用**的结果写进缓存（status 据此显示三态）。
+
+        只在回答路径记；后台沉淀用的是另一轮调用，失败也不该把徽章打成红
+        （答案已经交付了，那是沉淀的锅，不是模型服务的锅）。
+        """
+        try:
+            from .service_state import identity_of
+            self._svc.record(
+                "ok" if ok else "error",
+                identity=identity_of(self.model),
+                elapsed_ms=elapsed_ms, detail=detail)
+        except Exception as exc:  # 记状态绝不许掀翻对话
+            log.warning("写服务状态缓存失败（忽略）：%s", exc)
 
     # ---------- 组装 ----------
     def _assemble(
@@ -404,6 +436,10 @@ class ConversationService:
                          verification_in["verdict"])
 
         # ---- 读 ----
+        # 第二阶段：读取 memory 前，等待后台沉淀完成（防竞态）。
+        # chat() 是同步函数，在 FastAPI 里跑在线程池（没有 event loop），
+        # 必须把等待投递回"创建任务的那个 loop"，不能 asyncio.run 新建 loop。
+        self._wait_deposit_sync()
         # V0.5.2（D017 ⑤）：质量排序——信任档 + 时间衰减决定谁进 prompt，
         # 条数上限不变；prompt 文本格式不动（行为变化只来自顺序）。
         entries = sort_for_prompt(
@@ -412,18 +448,280 @@ class ConversationService:
             sid, entries, message, no_memorize=no_memorize)
         messages.append({"role": "user", "content": message})
 
-        answer = self.model.chat(
-            messages, timeout=self.settings.recall_timeout
-        ).strip()
+        _t0 = time.perf_counter()
+        try:
+            answer = self.model.chat(
+                messages, timeout=self.settings.recall_timeout
+            ).strip()
+        except ModelError as exc:
+            self._mark_service(False, detail=str(exc))
+            raise
+        _ms = round((time.perf_counter() - _t0) * 1000)
+        self._mark_service(True, elapsed_ms=_ms)
         if not answer:
             # 空回答不是回答：按模型故障处理（503），不拿空白糊弄用户
+            self._mark_service(False, elapsed_ms=_ms, detail="模型返回了空回答")
             raise ModelError("模型返回了空回答")
 
         # V0.4/V0.5：回答生成后，顺带选一个验证问题附在末尾（低存在感附加）。
         # 顺序固定：假设 → 规律 → 目标，一轮只问一个；刚解决完（确认/否决）
         # 本轮不再问新的（解决了一件事就闭嘴）。
         # 沉淀用模型原文（不含我们的问题），历史存用户实际看到的版本。
-        model_answer = answer
+        return self._write_turn(
+            sid=sid, message=message, model_answer=answer,
+            entries=entries, directives=directives, hyps=hyps, pats=pats,
+            verification_in=verification_in, paused=paused,
+            no_memorize=no_memorize, started=started)
+
+    async def _amodel_chunks(self, messages, timeout):
+        """取模型流：优先 async（真链路），Mock/旧适配器回落同步版。"""
+        fn = getattr(self.model, "chat_stream_async", None)
+        if fn is not None:
+            async for chunk in fn(messages, timeout=timeout):
+                yield chunk
+            return
+        for chunk in self.model.chat_stream(messages, timeout=timeout):
+            yield chunk
+
+    async def stream_chat(self, message: str, session_id: str | None = None):
+        """流式对话异步生成器（第一阶段 Streaming 真链路）。
+
+        yield 顺序：{"delta": 片段}×N → {"done": True, "reply": ChatReply.to_dict()}。
+        沉淀/归纳/验证附加在流结束后同步跑（与 chat 同语义，完整文本已得，
+        下一轮可见，无竞态）。空回答 → yield {"error": ...} 并结束。
+        """
+        started = time.perf_counter()
+        sid = self.chat_store.get_or_create_session(session_id)
+        paused = self.store.paused
+        no_memorize = is_no_memorize(message)
+        if no_memorize:
+            log.info("用户要求不记录：本轮跳过全部学习写路径（history 照常）")
+        verification_in = None
+        if not paused and not no_memorize:
+            try:
+                if self.hyp.get_pending() is not None:
+                    verification_in = resolve_pending_answer(
+                        self.hyp, message)
+                elif self.pat.get_pending() is not None:
+                    verification_in = resolve_pattern_answer(
+                        self.pat, message)
+                elif self.goal.get_pending() is not None:
+                    verification_in = resolve_goal_answer(
+                        self.goal, message)
+            except Exception as exc:
+                log.warning("验证回答处理失败（跳过）：%s", exc)
+                verification_in = None
+        # 第二阶段：读取 memory 前，等待后台沉淀完成（防竞态）。
+        # 注意：这里已经在 event loop 里，必须 await，不能 asyncio.run（会抛
+        # "cannot be called from a running event loop" 并静默跳过等待）。
+        try:
+            await asyncio.wait_for(self._await_deposit(),
+                                   timeout=self._deposit_wait_timeout)
+        except asyncio.TimeoutError:
+            log.warning("等待后台沉淀超时 %.0fs（用现有记忆继续）",
+                        self._deposit_wait_timeout)
+        except Exception as exc:  # 等待失败不掀翻对话
+            log.warning("等待后台沉淀失败（继续对话）：%s", exc)
+        entries = sort_for_prompt(
+            self.ctx.list_entries())[: self.settings.context_max_entries]
+        messages, directives, hyps, pats = self._assemble(
+            sid, entries, message, no_memorize=no_memorize)
+        messages.append({"role": "user", "content": message})
+        _t0 = time.perf_counter()
+        try:
+            parts = []
+            async for chunk in self._amodel_chunks(
+                    messages, self.settings.recall_timeout):
+                if chunk:
+                    parts.append(chunk)
+                    yield {"delta": chunk}
+        except ModelError as exc:
+            self._mark_service(
+                False,
+                elapsed_ms=round((time.perf_counter() - _t0) * 1000),
+                detail=str(exc))
+            yield {"error": str(exc)}
+            return
+        _ms = round((time.perf_counter() - _t0) * 1000)
+        self._mark_service(True, elapsed_ms=_ms)
+        model_answer = "".join(parts).strip()
+        if not model_answer:
+            self._mark_service(False, elapsed_ms=_ms, detail="模型返回了空回答")
+            yield {"error": "模型返回了空回答"}
+            return
+        try:
+            reply = self._write_turn(
+                sid=sid, message=message, model_answer=model_answer,
+                entries=entries, directives=directives, hyps=hyps, pats=pats,
+                verification_in=verification_in, paused=paused,
+                no_memorize=no_memorize, started=started)
+        except ModelError as exc:
+            yield {"error": str(exc)}
+            return
+        yield {"done": True, "reply": reply.to_dict()}
+
+    async def _deposit_bg(self, *, sid: str, message: str, model_answer: str,
+                          entries, hyps, pats, verification_out):
+        """后台沉淀：mark_used + deposit + induce + promote + B-path + goal。
+
+        这一段全是**同步阻塞**调用（含模型请求 5~9s）。必须整体丢进线程池，
+        否则它会卡死 event loop——那不叫后台，只叫"换个地方卡"。
+
+        任何异常只记日志，绝不影响已完成的聊天。
+        """
+        await asyncio.to_thread(
+            self._deposit_body, sid=sid, message=message,
+            model_answer=model_answer, entries=entries, hyps=hyps, pats=pats,
+            verification_out=verification_out)
+
+    def _deposit_body(self, *, sid: str, message: str, model_answer: str,
+                      entries, hyps, pats, verification_out):
+        """沉淀的实际工作（跑在线程池里，见 _deposit_bg）。"""
+        try:
+            self.ctx.mark_used(e.id for e in entries)
+            for e in entries:
+                e.used_count += 1
+            if hyps:
+                try:
+                    self.hyp.mark_used([h.id for h in hyps])
+                except Exception as exc:
+                    log.warning("假设使用计数失败（跳过）：%s", exc)
+            if pats:
+                try:
+                    self.pat.mark_used([p.id for p in pats])
+                except Exception as exc:
+                    log.warning("规律使用计数失败（跳过）：%s", exc)
+            # 沉淀（模型调用，5~9s）
+            try:
+                result: DepositResult = self.depositor.deposit(
+                    message, model_answer, entries)
+                deposit = result.to_dict()
+            except Exception as exc:
+                log.error("后台沉淀异常（跳过）：%s", exc)
+                deposit = {"error": f"沉淀异常，已跳过：{exc}"}
+            # 归纳
+            try:
+                induced = self.inducer.induce_all()
+                if induced.touched:
+                    log.info("归纳：新建 %d / 补证据 %d",
+                             len(induced.created), len(induced.linked))
+            except Exception as exc:
+                log.warning("归纳失败（跳过）：%s", exc)
+            # 晋升
+            try:
+                promoted = self.promoter.promote_all()
+                if promoted:
+                    log.info("晋升：新建规律 %d 条", len(promoted))
+            except Exception as exc:
+                log.warning("晋升失败（跳过）：%s", exc)
+            # B 路径
+            try:
+                if is_pattern_declaration(message):
+                    scope = pattern_scope_for(message)
+                    pat, why = self.pat.declare_from_user(
+                        message.strip()[:300], scope, message)
+                    if pat is not None:
+                        log.info("B 路径建待验证规律 [%s]", scope)
+                    else:
+                        log.debug("B 路径跳过：%s", why)
+            except Exception as exc:
+                log.warning("B 路径建规律失败（跳过）：%s", exc)
+            # Goal
+            try:
+                if is_goal_declaration(message):
+                    title = extract_goal_title(message)
+                    goal, why = self.goal.propose(title, message)
+                    if goal is not None:
+                        log.info("Goal 待确认：%s", title[:40])
+                    else:
+                        log.debug("Goal 跳过：%s", why)
+            except Exception as exc:
+                log.warning("Goal 提议失败（跳过）：%s", exc)
+            # 挂起复核
+            if verification_out is not None:
+                try:
+                    verification_out = self._retract_if_resolved(
+                        verification_out)
+                except Exception as exc:
+                    log.warning("挂起复核失败（保留原样）：%s", exc)
+            log.info("后台沉淀完成 session=%s deposit=%s",
+                     sid[:8],
+                     "ok" if not deposit.get("error") else deposit["error"])
+        except Exception as exc:
+            log.error("后台沉淀顶层异常（不影响聊天）：%s", exc)
+
+    def _schedule_deposit(self, *, sid: str, message: str, model_answer: str,
+                          entries, hyps, pats, verification_out):
+        """调度后台沉淀：去重 + create_task。同一条消息不重复沉淀。"""
+        import hashlib
+        key = hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
+        if key in self._deposit_dedup:
+            log.info("沉淀去重跳过：%s", key)
+            return
+        self._deposit_dedup.add(key)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # 无 event loop（同步测试）：直接跑完
+            asyncio.run(self._deposit_bg(
+                sid=sid, message=message, model_answer=model_answer,
+                entries=entries, hyps=hyps, pats=pats,
+                verification_out=verification_out))
+            return
+        task = loop.create_task(self._deposit_bg(
+            sid=sid, message=message, model_answer=model_answer,
+            entries=entries, hyps=hyps, pats=pats,
+            verification_out=verification_out))
+        self._deposit_tasks.add(task)
+        task.add_done_callback(self._deposit_tasks.discard)
+        self._loop = loop   # 供线程池侧投递等待（_wait_deposit_sync）
+
+    def _wait_deposit_sync(self):
+        """同步侧等待后台沉淀（chat() 在线程池里跑时用）。
+
+        把协程投递回"创建后台任务的那个 loop"执行并阻塞等待结果；
+        没有已知的 loop（纯同步场景，如测试、脚本）时什么都不做——
+        那种情况下 _schedule_deposit 已经直接 asyncio.run 跑完了。
+        """
+        loop = getattr(self, "_loop", None)
+        if loop is None or loop.is_closed():
+            return
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                self._await_deposit(), loop)
+            fut.result(timeout=self._deposit_wait_timeout)
+        except Exception as exc:
+            log.warning("等待后台沉淀失败（继续对话）：%s", exc)
+
+    async def _await_deposit(self):
+        """下一轮读取 memory 前，等待后台沉淀完成（防竞态）。"""
+        if not self._deposit_tasks:
+            return
+        pending = list(self._deposit_tasks)
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    async def shutdown(self):
+        """应用退出：取消所有后台沉淀任务，不产生孤儿。"""
+        if not self._deposit_tasks:
+            return
+        tasks = list(self._deposit_tasks)
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._deposit_tasks.clear()
+        self._loop = None
+        log.info("后台沉淀任务已全部取消")
+
+    def _write_turn(self, *, sid: str, message: str, model_answer: str,
+                    entries, directives, hyps, pats,
+                    verification_in, paused: bool, no_memorize: bool,
+                    started: float) -> ChatReply:
+        """快速路径：验证提问 + history 追加 → 立即返回。
+
+        慢速路径（mark_used + deposit + induce + promote + B-path + goal）
+        通过 _schedule_deposit 后台执行，不阻塞用户请求。
+        """
+        answer = model_answer
         verification_out = None
         resolved = (verification_in is not None
                     and verification_in.get("verdict") in ("confirm", "deny"))
@@ -446,99 +744,31 @@ class ConversationService:
                 else:
                     log.info("验证问题未挂起（%s），本轮不问", why)
 
-        # 判断可断言：指令存在 → approach = 指令；否则默认
         approach = directives or ["default"]
 
-        # ---- 写 ----
-        deposit: dict | None = None
+        # ---- 快速路径：history 追加（保证对话连贯）----
         if paused:
             log.info("暂停中：回答已给出，但不写消息、不沉淀")
         elif no_memorize:
-            # V0.5.3 P0-3：零学习写入；history 照常追加保证对话连贯，
-            # 但本轮两条标 suppressed=1（进 prompt 时隐藏，不可引用）。
-            # （history 不属于五个长期表，不违反"DB 零新增"验收）
             self.chat_store.append(sid, "user", message, suppressed=True)
             self.chat_store.append(sid, "assistant", answer, suppressed=True)
         else:
-            self.ctx.mark_used(e.id for e in entries)
-            for e in entries:  # 内存对象同步（回复里的 used_count 是"用过之后"）
-                e.used_count += 1
-            if hyps:
-                try:
-                    self.hyp.mark_used([h.id for h in hyps])
-                except Exception as exc:
-                    log.warning("假设使用计数失败（跳过）：%s", exc)
-            if pats:
-                try:
-                    self.pat.mark_used([p.id for p in pats])
-                except Exception as exc:
-                    log.warning("规律使用计数失败（跳过）：%s", exc)
-            # 沉淀自称"绝不抛异常"，这里再加一道保险：沉淀的任何失败
-            # （如 sqlite 锁）都不许吞掉用户已经拿到的回答。
-            # 注意：沉淀吃的是模型原文，不含我们附带的问题（问不算答）。
-            try:
-                result: DepositResult = self.depositor.deposit(
-                    message, model_answer, entries)
-            except Exception as exc:
-                log.error("沉淀异常（本轮跳过沉淀）：%s", exc)
-                result = DepositResult(error=f"沉淀异常，已跳过：{exc}")
-            deposit = result.to_dict()
-            # V0.3：沉淀后跑规则归纳（后台路径；失败只记日志，不打断对话）
-            try:
-                induced = self.inducer.induce_all()
-                if induced.touched:
-                    log.info("归纳：新建 %d / 补证据 %d",
-                             len(induced.created), len(induced.linked))
-            except Exception as exc:
-                log.warning("归纳失败（跳过）：%s", exc)
-            # V0.5：归纳后跑晋升（confirmed 假设组 → tentative 规律）
-            try:
-                promoted = self.promoter.promote_all()
-                if promoted:
-                    log.info("晋升：新建规律 %d 条", len(promoted))
-            except Exception as exc:
-                log.warning("晋升失败（跳过）：%s", exc)
-            # V0.5 B 路径：用户明确表达规律 → 建 tentative（验证后才算数）
-            try:
-                if is_pattern_declaration(message):
-                    scope = pattern_scope_for(message)
-                    pat, why = self.pat.declare_from_user(
-                        message.strip()[:300], scope, message)
-                    if pat is not None:
-                        log.info("B 路径建待验证规律 [%s]", scope)
-                    else:
-                        log.debug("B 路径跳过：%s", why)
-            except Exception as exc:
-                log.warning("B 路径建规律失败（跳过）：%s", exc)
-            # V0.5 Goal：用户明确表达目标 → 建 proposed（确认后才 active）
-            try:
-                if is_goal_declaration(message):
-                    title = extract_goal_title(message)
-                    goal, why = self.goal.propose(title, message)
-                    if goal is not None:
-                        log.info("Goal 待确认：%s", title[:40])
-                    else:
-                        log.debug("Goal 跳过：%s", why)
-            except Exception as exc:
-                log.warning("Goal 提议失败（跳过）：%s", exc)
-            # 本轮刚问出的问题，若目标在本轮写路径中已解决
-            # （如沉淀纠正联动否决了它），收回挂起：下轮不再误判，
-            # 元数据同步置空（回答正文已发出，历史保留原文）。
-            if verification_out is not None:
-                try:
-                    verification_out = self._retract_if_resolved(
-                        verification_out)
-                except Exception as exc:
-                    log.warning("挂起复核失败（保留原样）：%s", exc)
             self.chat_store.append(sid, "user", message)
             self.chat_store.append(sid, "assistant", answer)
+
+        # ---- 慢速路径：后台沉淀（不阻塞请求）----
+        if not paused and not no_memorize:
+            self._schedule_deposit(
+                sid=sid, message=message, model_answer=model_answer,
+                entries=entries, hyps=hyps, pats=pats,
+                verification_out=verification_out)
 
         reply = ChatReply(
             session_id=sid,
             answer=answer,
             approach=approach,
             context_used=[e.to_public_dict() for e in entries],
-            deposit=deposit,
+            deposit=None,  # 后台执行，请求内不可见
             paused=paused,
             duration_s=time.perf_counter() - started,
             hypotheses_used=[h.to_public_dict() for h in hyps],
@@ -546,11 +776,9 @@ class ConversationService:
             patterns_used=[p.to_public_dict() for p in pats],
         )
         log.info(
-            "对话完成 session=%s 判断=%s 沉淀=%s 耗时=%.1fs%s",
+            "对话完成 session=%s 判断=%s 沉淀=后台 耗时=%.1fs%s",
             sid[:8],
             approach if len(approach) <= 2 else f"{len(approach)}条指令",
-            "跳过（暂停）" if deposit is None else
-            f"新增{len(deposit['created'])}/纠正{len(deposit['corrected'])}",
             reply.duration_s,
             (" 验证提问=" + verification_out["hypothesis_id"][:8])
             if verification_out else "",

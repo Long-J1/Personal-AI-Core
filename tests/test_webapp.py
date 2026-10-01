@@ -28,11 +28,14 @@ _UNDERSTANDING = json.dumps(
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     import core.pipeline as pm
+    from core.service_state import ServiceState
 
     monkeypatch.setattr(pm, "THUMB_DIR", tmp_path / "thumbs")
     store = MemoryStore(tmp_path / "web.db")
     model = MockChatModel(understanding_queue=[_UNDERSTANDING])
-    return TestClient(create_app(store=store, model=model)), store, model
+    # 每个测试一份独立的服务状态缓存：status 三态测试靠它不互相污染
+    app = create_app(store=store, model=model, service_state=ServiceState())
+    return TestClient(app), store, model
 
 
 def _img_b64() -> str:
@@ -148,7 +151,14 @@ def test_conversation_endpoint_read_write_and_history(client):
     data = r.json()
     assert data["ok"] and data["answer"] == "收到，我记下了。"
     assert data["approach"] == ["default"]
-    assert data["deposit"]["created"]
+    # 第二阶段：deposit 后台执行，请求内不可见
+    assert data["deposit"] is None
+    # 等待后台沉淀完成
+    import time as _time
+    _time.sleep(12)
+    # 沉淀已写入 Context
+    ctx_items = c.get("/api/context").json()["items"]
+    assert any("高二" in e["content"] for e in ctx_items)
 
     # 同一会话第二轮：读侧生效（上一轮的理解进了提示词）
     sid = data["session_id"]
@@ -348,6 +358,300 @@ def test_status_model_service_ms_present(client):
 
 # ---------- V0.5 API：patterns / goals / reflection ----------
 
+# ============================================================
+# V. status 健康探针去联网 + 服务状态三态缓存
+# ============================================================
+
+def _boom_ping():
+    """任何被调用就炸的 ping —— status 若还联网，这些测试立刻红。"""
+    def _p(*a, **k):
+        raise AssertionError("status 不许调用 model.ping()！它会打跨网请求")
+    return _p
+
+
+def test_status_never_calls_ping(client):
+    """1) /api/status 绝不调用 model.ping()。"""
+    c, store, model = client
+    model.ping = _boom_ping()
+    r = c.get("/api/status")
+    assert r.status_code == 200
+    assert "model_service_state" in r.json()
+
+
+def test_status_initial_state_unknown(client):
+    """2) 初始就是 unknown，且不会为了显示"在线"去联网。"""
+    c, store, model = client
+    model.ping = _boom_ping()
+    s = c.get("/api/status").json()
+    assert s["model_service_state"] == "unknown"
+    assert s["model_service_ok"] is None      # None = 未知，不是 False
+    assert s["model_service_ms"] is None
+
+
+def test_status_ok_after_real_chat(client):
+    """3) 真实聊天成功后 status = ok。"""
+    c, store, model = client
+    assert c.get("/api/status").json()["model_service_state"] == "unknown"
+    model.text_queue = ["你好呀。", _deposit()]
+    r = c.post("/api/conversation", json={"message": "在吗"})
+    assert r.status_code == 200, r.text
+    s = c.get("/api/status").json()
+    assert s["model_service_state"] == "ok"
+    assert s["model_service_ok"] is True
+    assert isinstance(s["model_service_ms"], int)
+
+
+def test_status_error_after_real_chat_failure(client):
+    """4) 真实聊天失败后 status = error。"""
+    from models.base import ModelError
+    c, store, model = client
+
+    def boom(*a, **k):
+        raise ModelError("模拟模型挂了")
+
+    model.chat = boom
+    r = c.post("/api/conversation", json={"message": "在吗"})
+    assert r.status_code in (500, 503), r.status_code
+    s = c.get("/api/status").json()
+    assert s["model_service_state"] == "error"
+    assert s["model_service_ok"] is False
+
+
+def _identity_matching_test_adapter(client, *, ok):
+    """让 /api/model/test 造出的 adapter 与当前 model 同身份，
+    这样端点才会写缓存（identity 不同就不写——那是刻意设计）。"""
+    import httpx
+    from models.base import ServiceCheck
+    from models.openai_provider import OpenAICompatibleProvider
+    _, _, model = client
+    probe = OpenAICompatibleProvider(
+        "https://x.example/v1", "m", "sk-x",
+        transport=httpx.MockTransport(
+            lambda req: httpx.Response(200, json={"data": [{"id": "m"}]})))
+    # 端点只在「测的就是当前生效配置」时才写缓存（identity 必须一致），
+    # 所以把注入的 mock 对齐成同一身份。
+    model.name = probe.name
+    model.base_url = probe.base_url
+    model.model = probe.model
+
+    def fake_build(cfg, **kw):
+        p = probe
+        p.check_service = lambda timeout=8.0: ServiceCheck(
+            reachable=ok, model_ok=ok,
+            message="连接成功" if ok else "连不上", test_ok=ok)
+        return p
+
+    return fake_build, probe
+
+
+def test_status_ok_after_model_test(client, monkeypatch):
+    """5) /api/model/test 成功 → 缓存 ok → status 显示 ok。"""
+    import interfaces.webapp as W
+    c, store, model = client
+    fake_build, _probe = _identity_matching_test_adapter(client, ok=True)
+    monkeypatch.setattr(W, "build_model", fake_build)
+    r = c.post("/api/model/test", json={"provider": "openai",
+                                        "openai": {"model": "m"}})
+    assert r.json()["ok"] is True
+    assert c.get("/api/status").json()["model_service_state"] == "ok"
+
+
+def test_status_error_after_model_test_failure(client, monkeypatch):
+    """6) /api/model/test 失败 → 缓存 error → status 显示 error。"""
+    import interfaces.webapp as W
+    c, store, model = client
+    fake_build, _probe = _identity_matching_test_adapter(client, ok=False)
+    monkeypatch.setattr(W, "build_model", fake_build)
+    r = c.post("/api/model/test", json={"provider": "openai",
+                                        "openai": {"model": "m"}})
+    assert r.json()["ok"] is False
+    assert c.get("/api/status").json()["model_service_state"] == "error"
+
+
+def test_model_test_of_temp_config_does_not_touch_cache(client, monkeypatch):
+    """拿临时配置去测（≠ 当前生效配置）不许改徽章。"""
+    import interfaces.webapp as W
+    c, store, model = client
+    fake_build, _probe = _identity_matching_test_adapter(client, ok=True)
+    monkeypatch.setattr(W, "build_model", fake_build)
+    model.text_queue = ["你好呀。", _deposit()]
+    c.post("/api/conversation", json={"message": "在吗"})
+    assert c.get("/api/status").json()["model_service_state"] == "ok"
+    # 这次请求里的 adapter 身份与 model 不同（build 的是配置里的模型）
+    c.post("/api/model/test", json={"provider": "openai",
+                                    "openai": {"model": "完全另一个模型"}})
+    assert c.get("/api/status").json()["model_service_state"] == "ok"
+
+
+def test_settings_change_resets_to_unknown(client):
+    """7) 改模型设置后立即回到 unknown（旧模型的 ok 不能污染新模型）。"""
+    c, store, model = client
+    model.text_queue = ["你好呀。", _deposit()]
+    c.post("/api/conversation", json={"message": "在吗"})
+    assert c.get("/api/status").json()["model_service_state"] == "ok"
+
+    r = c.put("/api/model/settings", json={"provider": "openai",
+                                           "openai": {"model": "另一个模型"}})
+    assert r.status_code == 200, r.text
+    s = c.get("/api/status").json()
+    assert s["model_service_state"] == "unknown"
+    assert s["model_service_ok"] is None
+
+
+def test_stale_cache_not_reused_for_other_identity():
+    """8) provider/base_url/model 任一不同的旧 cache 不能复用。"""
+    from core.service_state import ServiceState
+    svc = ServiceState()
+    old_id = ("openai", "https://a.example/v1", "model-a")
+    svc.record("ok", identity=old_id, elapsed_ms=123)
+
+    assert svc.snapshot(old_id)["state"] == "ok"
+    # 换模型 / 换 base_url / 换 provider → 一律 unknown
+    for new_id in (("openai", "https://a.example/v1", "model-b"),
+                   ("openai", "https://b.example/v1", "model-a"),
+                   ("ollama", "https://a.example/v1", "model-a")):
+        snap = svc.snapshot(new_id)
+        assert snap["state"] == "unknown", new_id
+        assert snap["model"] is None, new_id
+
+
+def test_status_repeated_calls_make_no_network_request(client, monkeypatch):
+    """9) status 连打 20 次，一个网络包都不许发。
+
+    把 provider 层的出网入口整个堵死：只要 status 还联网就立刻炸。
+    （必须用 monkeypatch 还原——裸赋值会污染后面所有测试，
+      自己写的测试自己踩过一次。）
+    """
+    from models.openai_provider import OpenAICompatibleProvider
+    c, store, model = client
+    model.ping = _boom_ping()
+    monkeypatch.setattr(OpenAICompatibleProvider, "_do", _boom_ping())
+    for _ in range(20):
+        assert c.get("/api/status").status_code == 200
+
+
+def test_status_is_fast_and_local(client):
+    """10) status 明显快于原来的联网探测路径。"""
+    import time as _t
+    c, store, model = client
+    model.ping = _boom_ping()          # 原来这条要 ~640~821ms 跨网往返
+    c.get("/api/status")               # 预热
+    t0 = _t.perf_counter()
+    for _ in range(10):
+        c.get("/api/status")
+    avg = (_t.perf_counter() - t0) / 10 * 1000
+    assert avg < 60, f"status 平均 {avg:.0f}ms，仍然偏慢"
+
+
+def test_service_state_cache_is_thread_safe():
+    """并发读写不炸、最终态自洽（status 在线程池，写在 loop/后台线程）。"""
+    import threading
+    from core.service_state import ServiceState
+    svc = ServiceState()
+    ident = ("openai", "u", "m")
+    errors = []
+
+    def writer(ok):
+        try:
+            for _ in range(300):
+                svc.record("ok" if ok else "error", identity=ident, elapsed_ms=1)
+        except Exception as exc:
+            errors.append(exc)
+
+    def reader():
+        try:
+            for _ in range(300):
+                snap = svc.snapshot(ident)
+                assert snap["state"] in ("unknown", "ok", "error")
+        except Exception as exc:
+            errors.append(exc)
+
+    ts = [threading.Thread(target=writer, args=(i % 2 == 0,)) for i in range(4)]
+    ts += [threading.Thread(target=reader) for _ in range(4)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert not errors, errors
+    assert svc.snapshot(ident)["state"] in ("ok", "error")
+
+
+def test_model_not_listed_writes_error_not_ok(tmp_path, monkeypatch):
+    """语义核心：端点通但当前模型不在清单 → 缓存必须是 error，不是 ok。
+
+    这就是"provider 能访问 ≠ 当前模型可用"那条。
+    """
+    import httpx
+    from fastapi.testclient import TestClient
+    from interfaces.webapp import create_app
+    from memory.store import MemoryStore
+    from models.openai_provider import OpenAICompatibleProvider
+    from core.service_state import default_service_state
+
+    def handler(request):
+        return httpx.Response(200, json={"data": [{"id": "别人家的模型"}]})
+
+    p = OpenAICompatibleProvider("https://api.example.com/v1", "我要的模型", "sk-x",
+                                transport=httpx.MockTransport(handler))
+    check = p.check_service(timeout=1.0)
+    assert check.reachable is True          # 端点确实通
+    assert check.model_ok is False          # 但这个模型不在清单
+    assert check.healthy is False           # 严格判定：不健康
+    assert check.test_ok is True            # 既有 test_connection 语义不变（警告）
+    ok, msg = p.test_connection(timeout=1.0)
+    assert ok is True and "没有" in msg      # 老行为没被改
+
+
+def test_model_not_listed_end_to_end_writes_error(client, monkeypatch):
+    """需求核心，端到端：provider 能访问 ≠ 当前模型可用。
+
+    场景 = 实测到的智谱：/models 端点通、key 有效，但清单里没有你配的模型。
+    此时 `/api/model/test` 按 OpenAI 既有语义仍返回 ok（只是警告），
+    但**状态缓存必须是 error**——徽章不许骗人。
+    """
+    import httpx
+    import interfaces.webapp as W
+    from models.base import ServiceCheck
+    from models.openai_provider import OpenAICompatibleProvider
+    from core.service_state import identity_of
+
+    c, store, model = client
+    probe = OpenAICompatibleProvider(
+        "https://x.example/v1", "我配的模型", "sk-x",
+        transport=httpx.MockTransport(
+            lambda req: httpx.Response(200, json={"data": [{"id": "别人家的"}]})))
+    model.name, model.base_url, model.model = (
+        probe.name, probe.base_url, probe.model)
+
+    def fake_build(cfg, **kw):
+        probe.check_service = lambda timeout=8.0: ServiceCheck(
+            reachable=True, model_ok=False,
+            message="连接成功，但服务列表里没有「我配的模型」",
+            test_ok=True)
+        return probe
+
+    monkeypatch.setattr(W, "build_model", fake_build)
+    r = c.post("/api/model/test", json={"provider": "openai",
+                                        "openai": {"model": "我配的模型"}})
+    d = r.json()
+    assert d["ok"] is True                  # 既有 test_connection 语义：只警告
+    assert d["service_reachable"] is True   # 端点确实通
+    assert d["service_model_ok"] is False   # 但模型不在清单
+    assert d["service_healthy"] is False    # 严格判定：不健康
+    # 徽章不许显示"在线"
+    assert c.get("/api/status").json()["model_service_state"] == "error"
+
+
+def test_conversation_records_service_state_without_model_errors(client):
+    """记状态本身绝不能影响聊天结果（回归护栏）。"""
+    c, store, model = client
+    model.text_queue = ["正常回答。", _deposit()]
+    r = c.post("/api/conversation", json={"message": "你好"})
+    assert r.status_code == 200
+    assert r.json()["answer"] == "正常回答。"
+    assert c.get("/api/status").json()["model_service_state"] == "ok"
+
+
 def _v05_stores(client):
     from memory.goal_store import GoalStore
     from memory.pattern_store import PatternStore
@@ -411,3 +715,57 @@ def test_clear_memories_clears_patterns_keeps_goals(client):
     assert r["ok"] is True
     assert pat.count_live() == 0
     assert goal.get(g.id).status == "proposed"
+
+# ---------- 第二阶段：退出时取消后台沉淀（无孤儿） ----------
+
+def test_app_shutdown_cancels_background_deposit(tmp_path, monkeypatch):
+    """应用退出必须走 conversation.shutdown()（后台沉淀不留孤儿）。
+
+    这里盯的是**钩子接线**：钩子被删/改名，孤儿任务就没人收了。
+    （任务集合本身在 loop 拆除时也会被清空，盯它测不出接线问题。）
+    """
+    import time as _time
+    import core.pipeline as pm
+    from interfaces.webapp import create_app
+    from memory.store import MemoryStore
+
+    monkeypatch.setattr(pm, "THUMB_DIR", tmp_path / "thumbs")
+
+    class SlowModel(MockChatModel):
+        started = False
+
+        def chat(self, messages, *, images=None, timeout=None):
+            out = super().chat(messages, images=images, timeout=timeout)
+            if "记忆沉淀" in messages[0]["content"]:
+                SlowModel.started = True
+                _time.sleep(2.0)
+            return out
+
+    model = SlowModel(text_queue=[
+        "收到。",
+        json.dumps({"new": [{"kind": "fact", "content": "用户喜欢喝茶"}],
+                    "corrections": []}, ensure_ascii=False),
+    ])
+    store = MemoryStore(tmp_path / "shutdown.db")
+    app = create_app(store=store, model=model)
+    conv = app.state.conversation
+
+    shutdown_calls = []
+    orig_shutdown = conv.shutdown
+
+    async def _spy():
+        shutdown_calls.append(True)
+        await orig_shutdown()
+
+    conv.shutdown = _spy
+
+    with TestClient(app) as c:
+        r = c.post("/api/conversation/stream",
+                   json={"message": "我喜欢喝茶"})
+        assert r.status_code == 200
+        assert len(conv._deposit_tasks) >= 1, "后台任务没被调度"
+
+    # 出了 with → lifespan shutdown 触发
+    assert shutdown_calls == [True], "退出时没调用 conversation.shutdown()"
+    assert SlowModel.started, "沉淀根本没跑起来，这条测试就没意义"
+    assert len(conv._deposit_tasks) == 0, "退出后仍有后台沉淀任务（孤儿）"

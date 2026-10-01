@@ -32,7 +32,9 @@ def test_deny_fallback_despite_garbage_json(store, context_store,
     conv = ConversationService(store, context_store, model,
                                chat_store=chat_store)
     r = conv.chat("不对，我只是最近几天这样")
-    assert r.deposit and r.deposit.get("error"), "本轮 deposit 必须真的失败"
+    # 第二阶段：deposit 后台执行，请求内不可见；等待后验证否认生效
+    assert r.deposit is None
+    import time as _t; _t.sleep(12)
     h = hyp.get(h.id)
     assert h.status == "rejected"
     assert h.confidence == pytest.approx(0.25)
@@ -74,7 +76,9 @@ def test_ungrounded_question_creates_nothing(store, context_store,
                                chat_store=chat_store)
     r = conv.chat("我弟弟叫什么名字？")
     assert context_store.count_active() == 1  # 只剩被纠正的那条
-    assert r.deposit["corrected"], "纠正必须照常生效"
+    # 第二阶段：deposit 后台执行，请求内不可见；等待后检查实际状态
+    assert r.deposit is None
+    import time as _t; _t.sleep(12)
     assert context_store.get_entry(e.id).content == "用户是高一学生"
 
 

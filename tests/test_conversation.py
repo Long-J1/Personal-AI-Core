@@ -87,7 +87,9 @@ def test_context_read_shapes_prompt_and_write_lands(
         deposit_json(new=[{"kind": "profile", "content": "用户是高二学生"}]),
     ]
     r1 = conversation.chat("我是高二学生")
-    assert r1.deposit and len(r1.deposit["created"]) == 1
+    # 第二阶段：deposit 后台执行，请求内不可见
+    assert r1.deposit is None
+    import time as _t; _t.sleep(12)
     assert context_store.count_active() == 1
 
     # 轮2：读侧生效——上一轮写入的理解进了提示词
@@ -109,7 +111,9 @@ def test_conversation_can_feed_event_memory(conversation, store, mock_model):
         }),
     ]
     r = conversation.chat("我刚跑完5公里，累死了")
-    assert r.deposit["event_id"]
+    # 第二阶段：deposit 后台执行；事件已落库即可证
+    assert r.deposit is None
+    import time as _t; _t.sleep(12)
     assert store.count_events() == 1
     assert [e.description for e in store.search_events(["跑步"])] == ["用户刚跑完5公里"]
 
@@ -132,7 +136,8 @@ def test_deposit_garbage_skipped_gracefully(
     mock_model.text_queue = ["正常回答。", "这不是JSON"]
     r = conversation.chat("你好")
     assert r.answer == "正常回答。"
-    assert r.deposit and r.deposit["error"]
+    # 第二阶段：deposit 后台执行，请求内不可见；等待后验证失败
+    import time as _t; _t.sleep(12)
     assert context_store.count_active() == 0
 
 
@@ -144,7 +149,9 @@ def test_deposit_truncated_json_recovered(conversation, context_store, mock_mode
     )
     mock_model.text_queue = ["收到。", truncated]
     r = conversation.chat("我是高一的")
-    assert r.deposit and r.deposit["error"] is None
+    # 第二阶段：deposit 后台执行，请求内不可见；等待后验证成功
+    import time as _t; _t.sleep(12)
+    assert context_store.count_active() == 1
     assert [e.content for e in context_store.list_entries()] == ["用户是高一学生"]
 
 
@@ -187,9 +194,10 @@ def test_feedback_scenario_context_changes_judgment(conversation, context_store)
     ]
     r2 = conversation.chat("以后别直接给我答案，先给提示，我要自己想")
 
+    import time as _t; _t.sleep(12)   # 第二阶段：后台沉淀
     interaction = context_store.list_entries(kind="interaction")
     assert len(interaction) == 1
-    assert r2.deposit["created"][0]["kind"] == "interaction"
+    assert interaction[0].kind == "interaction"
     assert context_store.history()[0]["action"] == "create"  # 变更可查
 
     # ---- ③ 再次遇到同类情境：同一句话，判断可观察地变化 ----
@@ -226,7 +234,13 @@ def test_correction_takes_effect_immediately(
         }]),
     ]
     r2 = conversation.chat("不对，我刚才记错了，其实我是高一的")
-    assert r2.deposit["corrected"][0]["content"] == "用户是高一学生"
+    # 第二阶段：deposit 后台执行，请求内不可见；等待后从 DB 验证
+    assert r2.deposit is None
+    import time as _t; _t.sleep(12)
+    # 纠正已生效：旧值被替换
+    items = context_store.list_entries()
+    assert any("高一" in e.content for e in items)
+    assert not any("高二" in e.content for e in items)
 
     mock_model.text_queue = ["你读高一。", deposit_json()]
     conversation.chat("我读几年级？")
@@ -400,7 +414,8 @@ def test_b3_context_assembled_before_first_message(
 
 # ------------------------------------------------- C2：后台静默沉淀
 
-def test_c2_deposit_never_reported_in_answer(conversation, mock_model):
+def test_c2_deposit_never_reported_in_answer(conversation, context_store,
+                                             mock_model):
     """C2：沉淀在后台完成——回答原文不含任何'我学到了/已更新档案'式汇报，
     沉淀结果只出现在独立元数据字段。"""
     answer_text = "给你一个提示：先试试移项。"
@@ -414,7 +429,10 @@ def test_c2_deposit_never_reported_in_answer(conversation, mock_model):
     assert not any(
         m in r.answer for m in ("我学到了", "新理解", "已更新", "档案", "沉淀")
     )
-    assert r.deposit and r.deposit["created"]            # 沉淀信息只在元数据里
+    assert r.deposit is None  # 后台执行，请求内不可见
+    import time as _t; _t.sleep(12)
+    # 后台已写入 Context
+    assert context_store.count_active() >= 1
     history = conversation.chat_store.history(r.session_id, order="asc")
     assert history[-1]["role"] == "assistant"
     assert history[-1]["content"] == answer_text         # 存的历史也是原样

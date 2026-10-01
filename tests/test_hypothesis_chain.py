@@ -136,7 +136,11 @@ def test_deposit_exception_does_not_swallow_answer(
     monkeypatch.setattr(conv.depositor, "deposit", boom)
     r = conv.chat("你好")
     assert r.answer == "这是回答"
-    assert r.deposit is not None and "跳过" in (r.deposit.get("error") or "")
+    # 第二阶段：deposit 后台执行，请求内不可见；失败只记日志
+    assert r.deposit is None
+    import time as _t; _t.sleep(12)
+    # 回答已给出，沉淀失败不影响聊天
+    assert r.answer == "这是回答"
 
 
 def test_apply_creates_records_truncated_content(store, context_store):
@@ -161,7 +165,8 @@ def test_same_turn_reject_retracts_pending(chain):
     conv.chat("你好")
     conv.chat("在吗")
     r3 = conv.chat("不对，我一般不需要这种提醒")
-    assert r3.to_dict()["verification_question"] is None
+    # 第二阶段：deposit 后台执行，请求内不可见；等待后验证挂起已收回
+    import time as _t; _t.sleep(12)
     assert hyp.get_pending() is None
     # 全库只有一个假设（没有改述复活的双胞胎）
     assert len(hyp.list_hypotheses(live_only=False)) == 1

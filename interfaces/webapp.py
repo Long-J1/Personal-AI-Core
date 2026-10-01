@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import re
 import shutil
@@ -14,7 +15,7 @@ import time
 from pathlib import Path
 
 from fastapi import FastAPI, File, Query, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
@@ -24,6 +25,7 @@ from core.conversation import ConversationService
 from core.data_manager import DataManager, DataError
 from core.pipeline import CorePipeline
 from core.reflection import build_weekly_digest
+from core.service_state import ServiceState, default_service_state, identity_of
 from memory.chat_store import ChatStore
 from memory.context_store import ContextStore
 from memory.hypothesis_store import HypothesisStore
@@ -113,6 +115,7 @@ def create_app(
     hypothesis_store: HypothesisStore | None = None,
     pattern_store: PatternStore | None = None,
     goal_store: GoalStore | None = None,
+    service_state=None,
 ) -> FastAPI:
     ensure_dirs()
     store = store or MemoryStore(DB_PATH)
@@ -135,7 +138,11 @@ def create_app(
         hypothesis_store=hypothesis_store,
         pattern_store=pattern_store,
         goal_store=goal_store,
+        service_state=service_state,
     )
+    # 服务状态缓存：chat() 写、status 读、模型设置变更时重置。
+    # 生产用进程内单例（Core 只有一份模型配置）；测试可注入独立实例，避免互相污染。
+    service_state = service_state or default_service_state()
 
     def _safe_clear(pat_store) -> int:
         try:
@@ -153,6 +160,16 @@ def create_app(
             return None
 
     app = FastAPI(title="Personal AI Core", version=settings.version)
+    # 暴露给 app.state：诊断 / 测试要看"这台 app 正在跑的那个 conversation"
+    app.state.conversation = conversation
+
+    @app.on_event("shutdown")
+    async def _shutdown():
+        """应用退出：取消后台沉淀任务，不产生孤儿。"""
+        try:
+            await conversation.shutdown()
+        except Exception as exc:
+            log.warning("关闭时取消后台沉淀失败：%s", exc)
 
     # ---------- 页面 ----------
     @app.get("/")
@@ -171,26 +188,15 @@ def create_app(
     # ---------- 状态 ----------
     @app.get("/api/status")
     def status() -> dict:
-        ping = getattr(model, "ping", None)
-        service_ok = None
-        service_ms: int | None = None
-        if callable(ping):
-            # 限死 0.8s：status 是桌面壳的健康探针，绝不能被模型网络拖过探测超时
-            # （踩过的坑：ping 默认 2s 走代理 > 壳子 2s 探测线 → Core 活着却永远"没起来"）
-            # 耗时一并返回：UI 据此显示"在线/离线/未知"，False 不一定是真离线（可能只是慢）
-            try:
-                t0 = time.perf_counter()
-                service_ok = bool(ping(timeout=0.8))
-                service_ms = round((time.perf_counter() - t0) * 1000)
-            except TypeError:  # 某些实现的 ping() 不收 timeout
-                try:
-                    t0 = time.perf_counter()
-                    service_ok = bool(ping())
-                    service_ms = round((time.perf_counter() - t0) * 1000)
-                except Exception:
-                    service_ok = False
-            except Exception:
-                service_ok = False
+        """健康探针：**纯本地**，一个包都不发。
+
+        这里曾经调 model.ping() → GET {base}/models，于是页面每 15 秒一次
+        跨网往返（640~821ms），网络一慢就冲破探测线，壳子会误判 Core 没起来。
+        现在只读「最近一次真实调用」的结果缓存（core/service_state.py），
+        由聊天成功/失败、用户主动测试连接、模型设置变更这三处写入。
+        """
+        snap = service_state.snapshot(identity_of(model))
+        state = snap["state"]
         return {
             "version": settings.version,
             "model": getattr(model, "model", getattr(model, "name", "unknown")),
@@ -198,8 +204,16 @@ def create_app(
             "events": store.count_events(),
             "context_entries": context_store.count_active(),
             "hypotheses": _safe_hyp_count(),
-            "model_service_ok": service_ok,
-            "model_service_ms": service_ms,
+            # 老字段保留（前端三态徽章用）：unknown → None，向后兼容
+            "model_service_ok": True if state == "ok" else (
+                False if state == "error" else None),
+            # 新字段：三态原文 + 上次真实调用的耗时/时间（不再有"ping 耗时"）
+            "model_service_state": state,
+            "model_service_ms": snap["elapsed_ms"],
+            "model_service_checked_at": snap["updated_at"],
+            "model_service_detail": snap["detail"],
+            "model_service_provider": snap["provider"],
+            "model_service_model": snap["model"],
             "sessions": chat_store.count_sessions(),
             "paused": store.paused,
         }
@@ -218,6 +232,8 @@ def create_app(
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         if isinstance(model, ModelRegistry):
             model.reload()   # 只换推理引擎；Context/事件/会话一概不动
+        # 换了模型 → 旧状态一律作废（不然上一个模型的"在线"会污染新模型）
+        service_state.reset(detail="模型设置已变更，等待下一次真实调用")
         return {"ok": True, **public_view(cfg), "current": _describe(model)}
 
     @app.post("/api/model/test")
@@ -230,16 +246,49 @@ def create_app(
             return {"ok": False, "detail": str(exc)}
         except ModelError as exc:
             return {"ok": False, "detail": str(exc)}
-        tester = getattr(adapter, "test_connection", None)
-        if not callable(tester):
-            return {"ok": False, "detail": "该 Provider 不支持连接测试"}
-        try:
-            ok, detail = tester(timeout=8.0)
-        except Exception as exc:  # 连接测试绝不许把服务打崩
-            ok, detail = False, f"测试失败：{exc}"
+        # 优先用结构化判定（reachable / model_ok 分开），它才是模型可用性的
+        # 唯一来源；没有就退回老的 test_connection 二元结果。
+        checker = getattr(adapter, "check_service", None)
+        check = None
+        if callable(checker):
+            try:
+                t0 = time.perf_counter()
+                check = checker(timeout=8.0)
+                elapsed = round((time.perf_counter() - t0) * 1000)
+            except Exception as exc:  # 连接测试绝不许把服务打崩
+                check = None
+                ok, detail = False, f"测试失败：{exc}"
+                elapsed = None
+        if check is not None:
+            # 用户可见的 ok 沿用各 Provider 的既有约定（check.test_ok 就是
+            # 当年 test_connection 会返回的那个值）——那是产品行为，本次不动，
+            # 而且零额外网络请求。
+            ok, detail = check.test_ok, check.message
+        else:
+            tester = getattr(adapter, "test_connection", None)
+            if not callable(tester):
+                return {"ok": False, "detail": "该 Provider 不支持连接测试"}
+            try:
+                t0 = time.perf_counter()
+                ok, detail = tester(timeout=8.0)
+                elapsed = round((time.perf_counter() - t0) * 1000)
+            except Exception as exc:  # 连接测试绝不许把服务打崩
+                ok, detail, elapsed = False, f"测试失败：{exc}", None
+
+        # 缓存用**严格**判定：端点通但当前模型不可用 → error（不写 ok）
+        healthy = check.healthy if check is not None else bool(ok)
+        # 测的是「当前生效配置」才写缓存：拿临时配置去测不该改徽章
+        if identity_of(adapter) == identity_of(model):
+            service_state.record(
+                "ok" if healthy else "error",
+                identity=identity_of(adapter),
+                elapsed_ms=elapsed, detail=detail)
         return {"ok": bool(ok), "detail": detail,
                 "provider": cfg["provider"],
-                "model": getattr(adapter, "model", "")}
+                "model": getattr(adapter, "model", ""),
+                "service_reachable": getattr(check, "reachable", None),
+                "service_model_ok": getattr(check, "model_ok", None),
+                "service_healthy": healthy}
 
     # ---------- 数据管理（阶段2：导出/备份/恢复/导入，D010） ----------
     @app.get("/api/data/location")
@@ -363,6 +412,32 @@ def create_app(
                 {"ok": False, "error": f"模型暂不可用：{exc}"}, status_code=503
             )
         return {"ok": True, **reply.to_dict()}
+
+    @app.post("/api/conversation/stream")
+    async def post_conversation_stream(req: ConversationRequest):
+        """流式对话（SSE）：data: {"delta"}×N → data: {"done","reply"/"error"}。
+
+        async 直驱（无线程池切换）：首字即达。沉淀在流结束后同步跑
+        （与非流式同语义）。非流式端点原样保留。
+        """
+        async def gen():
+            try:
+                async for event in conversation.stream_chat(
+                        req.message, req.session_id):
+                    yield "data: " + json.dumps(
+                        event, ensure_ascii=False) + "\n\n"
+            except ModelError as exc:
+                log.error("流式对话失败：%s", exc)
+                yield "data: " + json.dumps(
+                    {"error": f"模型暂不可用：{exc}"},
+                    ensure_ascii=False) + "\n\n"
+            except Exception as exc:
+                log.error("流式沉淀异常：%s", exc)
+                yield "data: " + json.dumps(
+                    {"error": f"沉淀异常，已跳过：{exc}"},
+                    ensure_ascii=False) + "\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
 
     @app.get("/api/conversation/history")
     def conversation_history(
