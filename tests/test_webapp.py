@@ -914,6 +914,75 @@ def test_beta_code_not_logged(beta_client, caplog):
     assert FAKE_KEY not in text
 
 
+
+def _stub_adapter(monkeypatch, W, reachable, model_ok):
+    """让 build_model 返回一个 check_service 给出指定组合的适配器。
+
+    走的是真实 test_model_settings 逻辑，所以 ok / service_healthy 的
+    组合是它自己算出来的——这正是真机上遇到的那种情况。
+    """
+    from models.base import ServiceCheck
+
+    class _Adapter:
+        model = "fake-test-model"
+        provider = "openai"
+        base_url = "https://example.invalid/v1"
+
+        def check_service(self, timeout=8.0):
+            # message 是 ServiceCheck 的必填字段，少传会 TypeError，
+            # 然后被 test_model_settings 的 except 吞掉 -> check=None ->
+            # 退回用 ok，两种实现结果一样，测试就测不出东西了。
+            msg = ("连接成功，但服务列表里没有该模型，"
+                   "若该服务支持直接指定模型名，可忽略此提示") if reachable \
+                else "连接失败：模型服务不可达"
+            return ServiceCheck(reachable=reachable, model_ok=model_ok,
+                                message=msg, test_ok=reachable,
+                                names=("some-other-model",))
+
+        def test_connection(self, timeout=8.0):
+            if reachable:
+                return True, ("连接成功，但服务列表里没有该模型，"
+                              "若该服务支持直接指定模型名，可忽略此提示")
+            return False, "连接失败：模型服务不可达"
+
+    monkeypatch.setattr(W, "build_model", lambda cfg, timeout=None: _Adapter())
+
+
+def test_beta_unlock_reports_ready_when_model_not_in_list(beta_client, monkeypatch):
+    """真机验收抓到的缺陷：模型不在 /models 清单里时不该报「连接没通过」。
+
+    智谱的 glm-4-flash 就不在清单里，但直接指定模型名调用完全可用
+    （实测 TTFT 1.47s、回答正常）。若这里用 service_healthy（严格内部标志）
+    而不是 ok（产品口径），用户解锁后会以为 Beta 失败。
+    """
+    import interfaces.webapp as W
+    from models.base import ServiceCheck
+
+    c, store, model, tmp = beta_client
+    _stub_adapter(monkeypatch, W, reachable=True, model_ok=False)
+
+    r = c.post("/api/beta/unlock", json={"code": BETA_CODE}).json()
+    assert r["ok"] is True
+    # 关键断言：用产品口径而不是严格标志
+    assert r["connection_ok"] is True, r
+    assert r["detail"] == "已准备好，可以开始聊天", r["detail"]
+    # 仍然如实带上底层的警告文案，不隐瞒
+    assert "服务列表" in r["connection_detail"]
+
+
+def test_beta_unlock_reports_not_ready_when_really_down(beta_client, monkeypatch):
+    """反向：真的连不上时必须报「连接没通过」，别被上一个修复带跑。
+    """
+    import interfaces.webapp as W
+
+    c, store, model, tmp = beta_client
+    _stub_adapter(monkeypatch, W, reachable=False, model_ok=False)
+    r = c.post("/api/beta/unlock", json={"code": BETA_CODE}).json()
+    assert r["ok"] is True, r            # 解锁本身仍成功
+    assert r["connection_ok"] is False, r
+    assert "连接没通过" in r["detail"], r["detail"]
+
+
 def _v05_stores(client):
     from memory.goal_store import GoalStore
     from memory.pattern_store import PatternStore

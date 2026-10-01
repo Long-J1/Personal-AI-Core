@@ -338,7 +338,12 @@ def create_app(
         # 自动连接测试（结果写缓存，用户不用自己点）
         try:
             tr = test_model_settings(ModelSettingsRequest())
-            healthy = bool(tr.get("service_healthy"))
+            # 用 ok（产品口径，等价于当年 test_connection 的返回值），
+            # 不用 service_healthy（严格内部标志：模型必须在 /models 清单里）。
+            # 后者对「能直接指定模型名」的服务是假阴性——实测智谱的
+            # glm-4-flash 不在清单里，但真实聊天完全正常（TTFT 1.47s）。
+            # 用错标志会让用户解锁后看到「连接没通过」，以为 Beta 失败。
+            healthy = bool(tr.get("ok"))
             detail = ("已准备好，可以开始聊天" if healthy
                       else "已解锁，但连接没通过，可以到设置里查看")
             return {"ok": True, "detail": detail,
