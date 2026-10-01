@@ -87,6 +87,10 @@ class ModelSettingsRequest(BaseModel):
     openai: OpenAICfg | None = None
 
 
+class BetaUnlockRequest(BaseModel):
+    code: str = ""                      # Beta 体验码（只在本机比对，不上报）
+
+
 class RestoreRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
 
@@ -289,6 +293,76 @@ def create_app(
                 "service_reachable": getattr(check, "reachable", None),
                 "service_model_ok": getattr(check, "model_ok", None),
                 "service_healthy": healthy}
+
+    @app.on_event("startup")
+    async def _startup():
+        """启动时：Beta 体验活跃但配置被外部改过 → 重新套用预设。
+
+        没有活跃的 Beta 状态就什么都不做，绝不碰用户自己的配置。
+        """
+        try:
+            from core import beta
+            beta.apply_on_startup(model_settings_store)
+        except Exception as exc:      # 永不掀翻启动
+            log.warning("Beta 预设套用失败（忽略）：%s", exc)
+
+    # ---------- Beta 体验（V0.5.5 新手入门层） ----------
+    # 工程捷径：让第一次用的人不用碰 Base URL / Model / API Key。
+    # 不是授权系统：没有服务端校验、没有吊销，凭证在安装包里可被提取。
+
+    @app.get("/api/beta/status")
+    def beta_status() -> dict:
+        """Beta 体验是否可用 / 是否已激活（前端据此显示入口）。"""
+        try:
+            from core import beta
+            return {"ok": True, **beta.state()}
+        except Exception as exc:      # pragma: no cover - 永不掀翻页面
+            log.warning("Beta 状态读取失败：%s", exc)
+            return {"ok": False, "available": False, "active": False}
+
+    @app.post("/api/beta/unlock")
+    def beta_unlock(req: BetaUnlockRequest) -> dict:
+        """输入体验码 → 套用预设配置 → 自动连接测试。
+
+        失败时只回中性文案，不暴露端点 / 模型 / Key 任何细节。
+        """
+        from core import beta
+        ok, detail = beta.unlock(model_settings_store, (req.code or "").strip())
+        if not ok:
+            service_state.reset(detail="Beta 体验未解锁")
+            return {"ok": False, "detail": detail}
+        # 换了模型 → 旧状态作废（与手动改设置同一套语义）
+        if isinstance(model, ModelRegistry):
+            model.reload()
+        service_state.reset(detail="Beta 体验已解锁，等待首次真实调用")
+        # 自动连接测试（结果写缓存，用户不用自己点）
+        try:
+            tr = test_model_settings(ModelSettingsRequest())
+            healthy = bool(tr.get("service_healthy"))
+            detail = ("已准备好，可以开始聊天" if healthy
+                      else "已解锁，但连接没通过，可以到设置里查看")
+            return {"ok": True, "detail": detail,
+                    "connection_ok": healthy,
+                    "connection_detail": tr.get("detail", ""),
+                    "provider": tr.get("provider"),
+                    "model": tr.get("model")}
+        except Exception as exc:      # pragma: no cover
+            log.warning("Beta 解锁后自动测试失败：%s", exc)
+            return {"ok": True, "detail": "已解锁，可以开始聊天",
+                    "connection_ok": None}
+
+    @app.post("/api/beta/disable")
+    def beta_disable() -> dict:
+        """关闭 Beta 体验：还原解锁前的模型配置。
+
+        只碰模型设置——Memory、聊天历史、数据库一概不动。
+        """
+        from core import beta
+        ok, detail = beta.disable(model_settings_store)
+        if ok and isinstance(model, ModelRegistry):
+            model.reload()
+            service_state.reset(detail="已关闭 Beta 体验")
+        return {"ok": ok, "detail": detail}
 
     # ---------- 数据管理（阶段2：导出/备份/恢复/导入，D010） ----------
     @app.get("/api/data/location")

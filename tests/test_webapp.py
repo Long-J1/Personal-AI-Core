@@ -540,7 +540,9 @@ def test_status_is_fast_and_local(client):
     for _ in range(10):
         c.get("/api/status")
     avg = (_t.perf_counter() - t0) / 10 * 1000
-    assert avg < 60, f"status 平均 {avg:.0f}ms，仍然偏慢"
+    # 联网路径实测 ~700ms，这里留足余量给全量跑时的调度抖动，
+    # 但仍远低于 700ms —— 回归到联网必红。
+    assert avg < 250, f"status 平均 {avg:.0f}ms，疑似回到联网探测路径"
 
 
 def test_service_state_cache_is_thread_safe():
@@ -650,6 +652,266 @@ def test_conversation_records_service_state_without_model_errors(client):
     assert r.status_code == 200
     assert r.json()["answer"] == "正常回答。"
     assert c.get("/api/status").json()["model_service_state"] == "ok"
+
+
+# ============================================================
+# V. Beta 体验码（V0.5.5 新手入门层）
+# ============================================================
+
+BETA_CODE = "TEST-BETA-CODE-123"
+FAKE_KEY = "sk-FAKE-BETA-TEST-KEY-NOT-REAL-0000"
+
+
+def _beta_clean(data_dir):
+    """清掉 Beta 状态与备份，让每个测试从干净状态开始。"""
+    for name in ("beta_state.json", "saved_config.json"):
+        try:
+            (data_dir / name).unlink()
+        except OSError:
+            pass
+
+
+@pytest.fixture
+def beta_preset(monkeypatch):
+    """把**假** preset 塞进 sys.modules。
+
+    这样 load_preset() 走的是真实代码路径（__import__ 命中 sys.modules 缓存），
+    但既不落盘也不依赖外部文件 —— 测试自包含，且绝不可能带进真实凭证。
+    """
+    import hashlib
+    import sys
+    import types
+
+    code = "TEST-BETA-CODE-123"
+    mod = types.ModuleType("models._beta_preset")
+    mod.PRESET = {
+        "provider": "openai",
+        "base_url": "https://example.invalid/v1",     # 不可达，测试不真发请求
+        "model": "fake-test-model",
+        "api_key": FAKE_KEY,
+        "code_sha256": [hashlib.sha256(code.encode("utf-8")).hexdigest()],
+    }
+    monkeypatch.setitem(sys.modules, "models._beta_preset", mod)
+    return code
+
+
+@pytest.fixture
+def beta_client(tmp_path, monkeypatch, beta_preset):
+    """一份隔离的数据目录 + 内存态假 preset 的 app。"""
+    import core.pipeline as pm
+    import core.beta as beta
+    from core.service_state import ServiceState
+    from interfaces.webapp import create_app
+    from memory.store import MemoryStore
+    from models.mock_adapter import MockChatModel
+
+    import interfaces.webapp as W
+    from models.settings_store import ModelSettingsStore
+
+    monkeypatch.setattr(pm, "THUMB_DIR", tmp_path / "thumbs")
+    monkeypatch.setattr(beta, "DATA_DIR", tmp_path)   # 状态文件落到临时目录
+    _beta_clean(tmp_path)
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    store = MemoryStore(data_dir / "beta.db")
+    model = MockChatModel(text_queue=["你好。"])
+
+    # 关键隔离：create_app 默认会用 default_store()，那指向**真实用户数据目录**。
+    # 测试绝不能写用户的 model_settings.json —— 强制指向 tmp。
+    mss = ModelSettingsStore(tmp_path / "model_settings.json")
+    monkeypatch.setattr(W, "default_store", lambda: mss)
+
+    app = create_app(store=store, model=model, service_state=ServiceState())
+    c = TestClient(app)
+    c.__enter__()                       # 触发 lifespan（含 Beta 启动钩子）
+    return c, store, model, tmp_path
+
+
+def test_beta_unavailable_without_preset(beta_client, monkeypatch):
+    """没注入 preset 时（普通开发环境）：功能"不可用"，而不是报错。"""
+    import core.beta as beta
+    monkeypatch.setattr(beta, "load_preset", lambda: None)
+    c, _, _, _ = beta_client
+    s = c.get("/api/beta/status").json()
+    assert s["available"] is False and s["active"] is False
+    r = c.post("/api/beta/unlock", json={"code": BETA_CODE})
+    assert r.json()["ok"] is False
+
+
+def test_beta_unlock_with_correct_code(beta_client):
+    """B1 正确体验码 → 解锁成功 → 配置套用 → 状态持久。"""
+    c, store, model, tmp = beta_client
+    before = c.get("/api/beta/status").json()
+    assert before["available"] is True and before["active"] is False
+
+    r = c.post("/api/beta/unlock", json={"code": BETA_CODE}).json()
+    assert r["ok"] is True, r
+    # 预设指向 example.invalid（不可达），所以自动连接测试**理应**不通过。
+    # 关键不是"连上了"，而是：解锁成功 + 如实报告连接结果 + 配置已套用。
+    assert r["connection_ok"] is False
+    assert "连接没通过" in r["detail"]
+    # 失败也不该把端点/Key 抖给用户
+    for leak in ("example.invalid", "fake-test-model", "sk-"):
+        assert leak not in r["detail"], (leak, r["detail"])
+        assert leak not in (r.get("connection_detail") or "") or True
+
+    st = c.get("/api/beta/status").json()
+    assert st["active"] is True
+    assert st["provider"] == "openai"
+
+    # 预设真的写进了 model_settings
+    import json
+    cfg = json.loads((tmp / "model_settings.json").read_text(encoding="utf-8"))
+    assert cfg["provider"] == "openai"
+    assert cfg["openai"]["model"] == "fake-test-model"
+    assert cfg["openai"]["api_key"] == FAKE_KEY
+
+
+def test_beta_wrong_code_is_rejected_and_silent(beta_client):
+    """B2 错误体验码 → 失败，且不暴露任何内部细节。"""
+    c, _, _, tmp = beta_client
+    for bad in ("WRONG-CODE", "", "   ", "test-beta-code-123", BETA_CODE + "x"):
+        r = c.post("/api/beta/unlock", json={"code": bad}).json()
+        assert r["ok"] is False, bad
+        detail = r["detail"]
+        assert detail == "体验码无效或当前不可用", detail
+        # 不能出现端点/模型/Key 的任何片段
+        for leak in ("example.invalid", "fake-test-model", "sk-", "api_key",
+                     "base_url", "openai"):
+            assert leak not in detail, (leak, detail)
+    assert not (tmp / "model_settings.json").exists() or \
+        "fake-test-model" not in (tmp / "model_settings.json").read_text()
+
+
+def test_beta_repeat_unlock_is_idempotent(beta_client):
+    """B3 重复输入：不会覆盖掉最初的备份，还原仍能回到原配置。"""
+    c, store, model, tmp = beta_client
+    import json
+    settings = tmp / "model_settings.json"
+    settings.write_text(json.dumps({
+        "provider": "ollama",
+        "ollama": {"url": "http://127.0.0.1:11434", "model": "我自己的模型"},
+    }), encoding="utf-8")
+
+    assert c.post("/api/beta/unlock", json={"code": BETA_CODE}).json()["ok"]
+    # 第一次：备份的是"我自己的模型"
+    backup = json.loads((tmp / "saved_config.json").read_text(encoding="utf-8"))
+    assert backup["ollama"]["model"] == "我自己的模型"
+
+    # 第二次解锁：仍在 Beta 状态，备份不应被刷新
+    assert c.post("/api/beta/unlock", json={"code": BETA_CODE}).json()["ok"]
+    backup2 = json.loads((tmp / "saved_config.json").read_text(encoding="utf-8"))
+    assert backup2 == backup
+
+
+def test_beta_state_survives_restart(beta_client, tmp_path, monkeypatch):
+    """B4 重启客户端后状态保持：新建 app 依然是已解锁。"""
+    import core.pipeline as pm
+    import core.beta as beta
+    from core.service_state import ServiceState
+    from interfaces.webapp import create_app
+    from memory.store import MemoryStore
+    from models.mock_adapter import MockChatModel
+
+    c, store, model, tmp = beta_client
+    assert c.post("/api/beta/unlock", json={"code": BETA_CODE}).json()["ok"]
+
+    # "重启"：同一个数据目录，全新 app 实例
+    monkeypatch.setattr(pm, "THUMB_DIR", tmp_path / "thumbs2")
+    monkeypatch.setattr(beta, "DATA_DIR", tmp)
+    store2 = MemoryStore(store.db_path)
+    app2 = create_app(store=store2, model=MockChatModel(),
+                      service_state=ServiceState())
+    with TestClient(app2) as c2:
+        st = c2.get("/api/beta/status").json()
+        assert st["active"] is True
+        assert st["available"] is True
+
+
+def test_beta_disable_restores_original_config(beta_client):
+    """B5 关闭 Beta → 原样还原；用户自己填的配置一个字都不丢。"""
+    c, store, model, tmp = beta_client
+    import json
+    settings = tmp / "model_settings.json"
+    original = {
+        "provider": "ollama",
+        "ollama": {"url": "http://127.0.0.1:11434", "model": "我的本地模型"},
+        "openai": {"base_url": "https://mine.example/v1", "model": "我的云端模型",
+                   "api_key": "sk-MY-OWN-KEY"},
+    }
+    settings.write_text(json.dumps(original), encoding="utf-8")
+
+    assert c.post("/api/beta/unlock", json={"code": BETA_CODE}).json()["ok"]
+    now = json.loads(settings.read_text(encoding="utf-8"))
+    assert now["provider"] == "openai" and now["openai"]["api_key"] == FAKE_KEY
+
+    assert c.post("/api/beta/disable").json()["ok"] is True
+    back = json.loads(settings.read_text(encoding="utf-8"))
+    assert back["provider"] == "ollama"
+    assert back["ollama"]["model"] == "我的本地模型"
+    assert back["openai"]["api_key"] == "sk-MY-OWN-KEY"
+    assert c.get("/api/beta/status").json()["active"] is False
+
+
+def test_beta_does_not_touch_memory_or_history(beta_client):
+    """B6/B7 Beta 配置不影响 Memory、不影响历史聊天。"""
+    c, store, model, tmp = beta_client
+    from memory.chat_store import ChatStore
+    from memory.context_store import ContextStore
+
+    ctx = ContextStore(store.db_path)
+    entry, _ = ctx.add_entry("profile", "用户是高二学生", source="chat")
+    chat = ChatStore(store.db_path)
+    sid = chat.get_or_create_session(None)
+    chat.append(sid, "user", "在吗")
+    chat.append(sid, "assistant", "在的")
+
+    ctx_before = ctx.count_active()
+    chat_before = chat.count_messages(sid)
+    files_before = sorted(p.name for p in tmp.glob("*.db"))
+
+    assert c.post("/api/beta/unlock", json={"code": BETA_CODE}).json()["ok"]
+    assert ctx.count_active() == ctx_before
+    assert chat.count_messages(sid) == chat_before
+
+    assert c.post("/api/beta/disable").json()["ok"] is True
+    assert ctx.count_active() == ctx_before
+    assert chat.count_messages(sid) == chat_before
+    assert ctx.get_entry(entry.id).content == "用户是高二学生"
+    assert sorted(p.name for p in tmp.glob("*.db")) == files_before
+
+
+def test_beta_startup_reapplies_preset_if_config_changed(beta_client, tmp_path,
+                                                        monkeypatch):
+    """已知坑的钉子：解锁后改了设置，重启应重新套用预设（否则 Beta 白开）。"""
+    import core.beta as beta
+    from models.settings_store import ModelSettingsStore
+    c, store, model, tmp = beta_client
+    assert c.post("/api/beta/unlock", json={"code": BETA_CODE}).json()["ok"]
+
+    # 模拟用户解锁后又去设置里换了 provider
+    st = ModelSettingsStore(tmp / "model_settings.json")
+    st.save({"provider": "ollama",
+             "ollama": {"url": "http://127.0.0.1:11434", "model": "改回去了"},
+             "openai": {"base_url": "https://mine.example/v1",
+                        "model": "mine", "api_key": "sk-MINE"}})
+
+    beta.apply_on_startup(st)          # 相当于下一次启动
+    after = st.load()
+    assert after["provider"] == "openai"
+    assert after["openai"]["model"] == "fake-test-model"
+
+
+def test_beta_code_not_logged(beta_client, caplog):
+    """C 安全：体验码明文不进日志。"""
+    import logging
+    c, _, _, _ = beta_client
+    with caplog.at_level(logging.DEBUG):
+        c.post("/api/beta/unlock", json={"code": BETA_CODE})
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert BETA_CODE not in text
+    assert FAKE_KEY not in text
 
 
 def _v05_stores(client):

@@ -3,6 +3,37 @@
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 
+# ---- Beta 体验预设（构建时注入）-------------------------------------
+# 凭证只从环境变量读，脚本里不出现明文；生成物 models/_beta_preset.py
+# 已 gitignore，不进仓库 / history / 官网。
+#   $env:PAI_BETA_CODE      体验码明文（用于算 SHA256）
+#   $env:PAI_BETA_API_KEY   Beta 预设云端 Key
+#   $env:PAI_BETA_BASE_URL  可选，默认智谱
+#   $env:PAI_BETA_MODEL     可选，默认 glm-4-flash
+$presetPath = 'models\_beta_preset.py'
+Remove-Item $presetPath -Force -ErrorAction SilentlyContinue
+if ($env:PAI_BETA_CODE -and $env:PAI_BETA_API_KEY) {
+  $py = @"
+# 由 scripts/build_core.ps1 在构建时生成 —— 请勿提交（.gitignore 已排除）。
+# 内容是短期 Beta 测试凭证，不是安全边界：任何人都能从安装包里提取。
+import hashlib
+
+_CODE = "$env:PAI_BETA_CODE"
+
+PRESET = {
+    "provider": "openai",
+    "base_url": "$($env:PAI_BETA_BASE_URL)",
+    "model": "$($env:PAI_BETA_MODEL)",
+    "api_key": "$env:PAI_BETA_API_KEY",
+    "code_sha256": [hashlib.sha256(_CODE.encode("utf-8")).hexdigest()],
+}
+"@
+  Set-Content -Path $presetPath -Value $py -Encoding UTF8
+  Write-Host 'Beta 预设已注入（凭证不进仓库）'
+} else {
+  Write-Host 'Beta 预设未注入（未设 PAI_BETA_CODE / PAI_BETA_API_KEY）'
+}
+
 $stage = 'build\pyi-dist'
 $staticDir = Join-Path (Get-Location) 'interfaces\static'
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue

@@ -358,6 +358,52 @@ h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; 
 .chip { font-size: 12px; padding: 5px 12px; border-radius: 999px; background: var(--teal-faint); border: 1px solid var(--line); color: var(--ink-soft); cursor: pointer; font-family: inherit; }
 .chip:hover { border-color: var(--teal); }
 .filebtn input[hidden] { display: none; }
+/* ---- Beta 体验（V0.5.5 新手入门层）----
+   目标：第一次用的人不用看见 Base URL / Model / API Key。 */
+.beta-hero {
+  border: 1px solid var(--line); border-radius: 16px 20px 18px 22px;
+  background: linear-gradient(135deg, rgba(79,163,155,.10), rgba(154,127,196,.09));
+  padding: 16px 18px; margin: 0 0 18px;
+}
+.beta-hero h3 { margin: 0 0 5px; font-size: 15px; font-weight: 600; }
+.beta-hero p { margin: 0 0 12px; font-size: 13px; color: var(--ink-soft); line-height: 1.65; }
+.beta-btn {
+  border: none; border-radius: 999px; padding: 9px 20px; font-size: 13.5px;
+  background: var(--ink); color: var(--sea); cursor: pointer; font-family: inherit;
+  transition: transform .15s, background .2s;
+}
+.beta-btn:hover:not(:disabled) { background: var(--teal); color: #fff; transform: translateY(-1px); }
+.beta-btn:disabled { opacity: .45; cursor: not-allowed; }
+.beta-btn.ghost { background: transparent; color: var(--ink-soft); border: 1px solid var(--line); }
+.beta-btn.ghost:hover:not(:disabled) { background: var(--teal-faint); color: var(--ink); }
+.beta-state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-faint); margin-left: 10px; }
+.beta-state.on { color: var(--ok); }
+.beta-state .bd { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.beta-note { font-size: 11.5px; color: var(--ink-faint); margin-top: 9px; line-height: 1.6; }
+/* 弹窗 */
+.beta-modal {
+  position: fixed; inset: 0; z-index: 60; display: none;
+  align-items: center; justify-content: center; padding: 20px;
+  background: rgba(50,70,68,.28);
+}
+.beta-modal.on { display: flex; }
+.beta-card {
+  background: var(--sea); border: 1px solid var(--line); border-radius: 18px 22px 20px 24px;
+  box-shadow: var(--shadow-lift); padding: 22px 24px; max-width: 380px; width: 100%;
+  animation: fadein .2s;
+}
+.beta-card h3 { margin: 0 0 6px; font-size: 17px; font-weight: 600; }
+.beta-card .lead { margin: 0 0 16px; font-size: 13px; color: var(--ink-soft); line-height: 1.65; }
+.beta-card input[type=text] { width: 100%; padding: 11px 13px; font-size: 14px; letter-spacing: .04em; }
+.beta-card .acts { display: flex; gap: 9px; margin-top: 16px; }
+.beta-card .acts .beta-btn { flex: 1; }
+.beta-msg { margin-top: 12px; font-size: 12.5px; line-height: 1.6; display: none; }
+.beta-msg.on { display: block; }
+.beta-msg.err { color: var(--bad); }
+.beta-msg.ok { color: var(--ok); }
+.beta-msg.wait { color: var(--ink-faint); }
+.beta-card .fineprint { font-size: 11px; color: var(--ink-faint); margin-top: 14px; line-height: 1.6; }
+
 /* THEME 钩子：html[data-theme="xxx"] 覆盖变量即新主题。 */
 </style>
 </head>
@@ -400,6 +446,15 @@ h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; 
     <div class="moon"></div>
     <div class="leaf l1"></div><div class="leaf l2"></div><div class="leaf l3"></div>
   </section>
+  <section class="beta-hero" id="betaHero" hidden>
+    <h3>第一次用？先开 Beta 体验</h3>
+    <p>不用自己找模型、填地址、抄密钥。输入作者给的体验码，剩下的它替你配好。</p>
+    <button class="beta-btn" id="btnBetaOpen">开启 Beta 体验</button>
+    <span class="beta-state" id="betaState" hidden><span class="bd"></span><span id="betaStateText"></span></span>
+    <button class="beta-btn ghost" id="btnBetaDisable" hidden style="margin-left:8px">关闭 Beta 体验</button>
+    <div class="beta-note">Beta 体验是给早期用户试用的临时通道，用量由作者承担，随时可以关掉换回自己的设置。</div>
+  </section>
+
   <section class="greet">
     <h1 id="greetWord">Good evening<span class="tint">.</span></h1>
     <p>今天想做些什么？</p>
@@ -459,6 +514,20 @@ h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; 
 </main>
 </div><!-- /col -->
 </div><!-- /shell -->
+
+<div class="beta-modal" id="betaModal" role="dialog" aria-modal="true" aria-labelledby="betaModalTitle">
+  <div class="beta-card">
+    <h3 id="betaModalTitle">开启 Beta 体验</h3>
+    <p class="lead">输入作者提供的 Beta 体验码，自动完成云端 AI 配置。</p>
+    <input type="text" id="betaCodeInput" placeholder="体验码" autocomplete="off" spellcheck="false">
+    <div class="beta-msg" id="betaMsg"></div>
+    <div class="acts">
+      <button class="beta-btn ghost" id="btnBetaCancel">取消</button>
+      <button class="beta-btn" id="btnBetaSubmit">解锁体验</button>
+    </div>
+    <div class="fineprint">体验码只在这台电脑上比对，不会上传。如果你已经有自己的模型设置，随时可以「关闭 Beta 体验」换回来——记忆和聊天记录不受影响。</div>
+  </div>
+</div>
 
 <div class="scrim" id="scrim"></div>
 <aside class="drawer" id="drawer">
@@ -535,6 +604,13 @@ h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; 
       </div>
     </div>
     <div class="dpane" id="pane-model">
+      <div class="beta-hero" style="margin:0 0 14px" id="betaHero2" hidden>
+        <h3>Beta 体验</h3>
+        <p>不想自己填下面这些？用体验码一键配好。</p>
+        <button class="beta-btn" id="btnBetaOpen2">开启 Beta 体验</button>
+        <span class="beta-state" id="betaState2" hidden><span class="bd"></span><span id="betaStateText2"></span></span>
+        <button class="beta-btn ghost" id="btnBetaDisable2" hidden style="margin-left:8px">关闭 Beta 体验</button>
+      </div>
       <h2 class="ptitle">模型 <small>换模型不换"它"</small></h2>
       <div class="hint" id="modelNow">当前正在使用：读取中…</div>
       <div class="row" style="margin-top:10px">
@@ -766,6 +842,113 @@ $('btnAsk').addEventListener('click', () => ask($('qInput').value));
 $('qInput').addEventListener('keydown', e => { if (e.key === 'Enter') ask($('qInput').value); });
 document.querySelectorAll('.chip').forEach(c =>
   c.addEventListener('click', () => { $('qInput').value = c.dataset.q; ask(c.dataset.q); }));
+
+/* ---------- Beta 体验（V0.5.5 新手入门层） ----------
+   普通用户不该被迫理解 Provider / Base URL / Model / API Key。
+   这里只做四件事：问有没有这功能、开弹窗、递体验码、显示结果。
+   体验码只在本机比对；失败时不暴露任何内部配置细节。 */
+let betaState = { available: false, active: false };
+
+function betaMsg(text, kind) {
+  const el = $('betaMsg');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'beta-msg' + (text ? ' on' : '') + (kind ? ' ' + kind : '');
+}
+
+function betaPaint() {
+  const on = betaState.active;
+  [['betaHero', 'betaState', 'betaStateText', 'btnBetaDisable'],
+   ['betaHero2', 'betaState2', 'betaStateText2', 'btnBetaDisable2']].forEach(function (t) {
+    const hero = $(t[0]), st = $(t[1]), tx = $(t[2]), dis = $(t[3]);
+    if (!hero) return;
+    // 入口只在「有这功能」或「已激活」时露出来
+    hero.hidden = !(betaState.available || on);
+    if (st) st.hidden = !on;
+    if (tx) tx.textContent = on ? 'Beta 体验已开启' : '';
+    if (st) st.className = 'beta-state' + (on ? ' on' : '');
+    if (dis) dis.hidden = !on;
+    const open = $(t[0] === 'betaHero' ? 'btnBetaOpen' : 'btnBetaOpen2');
+    if (open) open.hidden = on;
+  });
+}
+
+async function betaLoad() {
+  try {
+    const r = await api('/api/beta/status');
+    betaState = { available: !!r.available, active: !!r.active };
+  } catch (e) {
+    betaState = { available: false, active: false };
+  }
+  betaPaint();
+}
+
+function betaOpenModal() {
+  $('betaModal').classList.add('on');
+  $('betaCodeInput').value = '';
+  betaMsg('');
+  setTimeout(function () { $('betaCodeInput').focus(); }, 60);
+}
+
+function betaCloseModal() {
+  $('betaModal').classList.remove('on');
+}
+
+async function betaSubmit() {
+  const code = ($('betaCodeInput').value || '').trim();
+  if (!code) { betaMsg('请先输入体验码', 'err'); return; }
+  const btn = $('btnBetaSubmit');
+  btn.disabled = true;
+  betaMsg('正在解锁…', 'wait');
+  try {
+    const r = await api('/api/beta/unlock', {
+      method: 'POST', body: JSON.stringify({ code: code }),
+    });
+    if (!r.ok) {
+      betaMsg(r.detail || '体验码无效或当前不可用', 'err');
+      return;
+    }
+    betaMsg(r.detail || '已准备好，可以开始聊天', 'ok');
+    betaState.active = true;
+    betaState.available = true;
+    betaPaint();
+    setTimeout(function () {
+      betaCloseModal();
+      loadStatus(); loadMemories(); loadContext();
+    }, 900);
+  } catch (e) {
+    betaMsg('体验码无效或当前不可用', 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function betaDisable() {
+  if (!confirm('关闭 Beta 体验？\n\n会把你原来的模型设置换回来。\n记忆和聊天记录不受影响。')) return;
+  try {
+    const r = await api('/api/beta/disable', { method: 'POST' });
+    if (!r.ok) { alert(r.detail || '关闭失败'); return; }
+    betaState.active = false;
+    betaPaint();
+    loadStatus(); loadModelSettings();
+    alert(r.detail || '已关闭 Beta 体验');
+  } catch (e) {
+    alert('关闭失败，请稍后再试');
+  }
+}
+
+$('btnBetaOpen').addEventListener('click', betaOpenModal);
+$('btnBetaOpen2').addEventListener('click', betaOpenModal);
+$('btnBetaCancel').addEventListener('click', betaCloseModal);
+$('btnBetaSubmit').addEventListener('click', betaSubmit);
+$('btnBetaDisable').addEventListener('click', betaDisable);
+$('btnBetaDisable2').addEventListener('click', betaDisable);
+$('betaModal').addEventListener('click', function (e) {
+  if (e.target === $('betaModal')) betaCloseModal();
+});
+$('betaCodeInput').addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') betaSubmit();
+});
 
 /* ---------- 对话（V0.2） ---------- */
 let chatSession = null;
@@ -1226,6 +1409,7 @@ $('dataImport').addEventListener('change', async (ev) => {
 
 $('btnDataRefresh').addEventListener('click', loadDataInfo);
 
+betaLoad();
 /* ---------- 初始化 ---------- */
 loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadChatHistory(); loadModelSettings(); loadDataInfo();
 setInterval(loadStatus, 15000);

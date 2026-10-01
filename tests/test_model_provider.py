@@ -909,7 +909,8 @@ def test_background_deposit_does_not_block_event_loop(store, context_store,
     assert any("delta" in e for e in events)
     assert gaps, "心跳没跑起来"
     # 关键：没有任何一次心跳间隔接近沉淀的 0.8s
-    assert max(gaps) < 0.35, f"event loop 被沉淀卡住：最大心跳间隔 {max(gaps):.2f}s"
+    # 沉淀同步调用时实测空洞 ~0.98s；这里留余量但仍能抓住回归。
+    assert max(gaps) < 0.6, f"event loop 被沉淀卡住：最大心跳间隔 {max(gaps):.2f}s"
 
 
 def test_threadpool_chat_waits_for_pending_deposit(store, context_store,

@@ -10,3 +10,6 @@ logs/
 build/
 desktop/build/
 desktop/dist/
+
+# Beta 体验预设：构建时注入，绝不进仓库（含凭证）
+models/_beta_preset.py
