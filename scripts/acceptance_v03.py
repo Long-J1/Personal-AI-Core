@@ -157,8 +157,11 @@ def main() -> int:
         ok("删除/恢复闭环")
 
         # 8. UI 区块存在且与④分开
+        # 按本意断言结构，不钉标题字串：卡片化后标题措辞变过
+        # （"待验证假设" → "这些是我的猜测"），但"独立一块、JS 接着"
+        # 这两件事没变，钉字串只会在改文案时误报。
         html = c.get("/").text
-        if "待验证假设" not in html or "hypoList" not in html:
+        if 'id="pane-hypo"' not in html or "hypoList" not in html:
             fail("首页缺少假设区块")
         if "它对你的理解" not in html:
             fail("④信任界面被破坏")

@@ -151,8 +151,10 @@ def main() -> int:
         ok("无主动设施：verifier 无定时/推送/后台痕迹")
 
         # 8. UI 未扩张（问题在对话流内，无新区块）
+        # 按本意断言结构，不钉标题字串（卡片化后措辞变过，
+        # 但"假设区块还在、且没有为验证问题新开一块"没变）。
         html = c.get("/").text
-        if "待验证假设" not in html:
+        if 'id="pane-hypo"' not in html:
             fail("假设区块被破坏")
         ok("UI 未扩张：问题只活在对话流里")
 

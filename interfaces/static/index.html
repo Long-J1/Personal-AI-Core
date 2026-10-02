@@ -395,6 +395,63 @@ body > .shell { flex: 1; min-height: 0; display: flex; flex-direction: row; }
 .bgacts button.no:hover { border-color: var(--bad); color: var(--bad); }
 .bgacts button.dim:hover { border-color: var(--ink-faint); color: var(--ink-faint); }
 
+/* ---- 待验证卡片 ----
+   视觉语言沿用 ucard/bgcard（同圆角、同字阶、同 token），但三处刻意不同：
+   我眼中的你 = 稳定实心卡片 · 我正在思考 = 虚线低强调 · 待验证 = 实线+更强主标题
+   因为只有这里需要用户动手，得比另外两个更突出一点。 */
+.cintro { margin: 0 0 14px; padding: 14px 16px; border-radius: 15px 18px 16px 19px;
+  background: linear-gradient(135deg, var(--teal-soft), var(--sea-deep));
+  border: 1px solid var(--line); }
+.cintro b { display: block; font-size: 14px; color: var(--ink); margin-bottom: 4px; }
+.cintro span { font-size: 12.5px; color: var(--ink-soft); line-height: 1.7; }
+
+.ccards { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 11px;
+  grid-template-columns: repeat(auto-fill, minmax(288px, 1fr)); }
+.ccard { background: var(--card-glass); border: 1px solid var(--line);
+  border-radius: 14px 18px 15px 17px; padding: 13px 15px; min-width: 0; }
+.c-pending { border-color: var(--teal); }
+.c-watching { opacity: .9; border-style: dashed; }
+.c-settled { opacity: .78; }
+.ctopic { font-size: 12px; font-weight: 600; color: var(--ink); line-height: 1.5;
+  letter-spacing: .01em; overflow-wrap: anywhere; }
+.cstate { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.cbadge { font-size: 11px; padding: 2px 9px; border-radius: 999px; }
+.cbadge.b-pending { background: var(--teal-soft); color: var(--teal); }
+.cbadge.b-watching { background: var(--lilac-soft); color: var(--lilac); }
+.cbadge.b-settled { background: var(--sea-deep); color: var(--ink-faint); }
+.cwhen { font-size: 11.5px; color: var(--ink-faint); }
+.cabout { margin-top: 9px; font-size: 13.5px; color: var(--ink-soft); line-height: 1.7;
+  overflow-wrap: anywhere; }
+.cwhy { margin-top: 10px; font-size: 12px; padding: 4px 11px; border-radius: 999px;
+  border: 1px solid var(--line); background: transparent; color: var(--ink-soft); cursor: pointer; }
+.cwhy:hover { border-color: var(--teal); color: var(--teal); }
+.cwhybox { margin-top: 9px; padding: 10px 12px; border-radius: 12px;
+  background: var(--teal-faint); font-size: 12.5px; color: var(--ink-soft); line-height: 1.75; }
+.cev { margin: 0 0 6px; padding-left: 9px; border-left: 2px solid var(--line);
+  overflow-wrap: anywhere; }
+.cev:last-of-type { margin-bottom: 0; }
+.cevw { color: var(--ink-faint); margin-right: 7px; }
+.ctail { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line);
+  color: var(--ink-faint); }
+.cnoev { margin-top: 9px; font-size: 12px; color: var(--ink-faint); font-style: italic; }
+.cacts { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+.cacts button { font-size: 12.5px; padding: 5px 20px; border-radius: 999px;
+  border: 1px solid var(--line); background: transparent; color: var(--ink-soft); cursor: pointer; }
+.cacts button.ok:hover { border-color: var(--ok); color: var(--ok); }
+.cacts button.no:hover { border-color: var(--bad); color: var(--bad); }
+.csettled { margin-top: 16px; }
+.csettled > summary { cursor: pointer; font-size: 12px; color: var(--ink-faint);
+  padding: 7px 12px; border-radius: 999px; background: var(--sea-deep);
+  width: fit-content; list-style: none; }
+.csettled > summary::-webkit-details-marker { display: none; }
+.csettled > summary:hover { color: var(--teal); }
+/* 窄屏：卡片强制单列。按钮不被挤压，长引用自己换行。 */
+@media (max-width: 560px) {
+  .ccards { grid-template-columns: 1fr; }
+  .ccard { padding: 12px 13px; }
+  .cacts button { flex: 1 1 auto; min-width: 74px; }
+}
+
 .memlist { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 9px; }
 .mem { background: var(--card-glass); border: 1px solid var(--line); border-radius: 12px 15px 13px 16px; padding: 10px 13px; display: flex; gap: 10px; align-items: flex-start; }
 .mem .when { font-size: 11px; color: var(--ink-faint); white-space: nowrap; min-width: 76px; padding-top: 3px; }
@@ -665,10 +722,17 @@ h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; 
       <div id="bgEmpty" class="hint" hidden>现在没有推测。多聊几天，我看到的东西会慢慢变多。</div>
     </div>
     <div class="dpane" id="pane-hypo">
-      <h2 class="ptitle">待验证假设 <small>它的猜测，不是事实——可确认 · 否决 · 删除</small></h2>
+      <div class="cintro">
+        <b>这些是我的猜测</b>
+        <span>我不确定，所以放这儿等你判断。「对」是值得继续观察，不代表已经是事实。</span>
+      </div>
       <div class="row tools ghosty"><button id="btnHypoRefresh">刷新</button></div>
-      <ul id="hypoList" class="memlist"></ul>
-      <div id="hypoEmpty" class="hint" hidden>还没有假设。等它从你的行为里看出重复的模式，才会谨慎地提一个。</div>
+      <ul id="hypoList" class="ccards"></ul>
+      <div id="hypoEmpty" class="hint" hidden>还没有猜测。等它从你的行为里看出重复的模式，才会谨慎地提一个。</div>
+      <details id="hypoSettledWrap" class="csettled" hidden>
+        <summary><span id="hypoSettledCount"></span> · 展开查看</summary>
+        <ul id="hypoSettledList" class="ccards"></ul>
+      </details>
     </div>
     <div class="dpane" id="pane-history">
       <h2 class="ptitle">回忆库 <small>从记忆里检索并回答，附带依据</small></h2>
@@ -1090,23 +1154,57 @@ async function loadChatHistory() {
 
 /* 处理摘要：内部判断的可折叠替代品。
    只写"做了哪几步"这种产品化措辞；不出现 approach / deposit / 分类 /
-   hypothesis / correction 这类内部字段名，也不放模型原始推理链。 */
-function buildTrace(reply) {
+   hypothesis / correction / confidence / scope 这类内部字段名，
+   也不放模型原始推理链。
+
+   内容全部来自**本轮真实数据**：Judgment 给出的 reasons 是后端已经翻好的人话
+   （"我记得你之前说过这类题你更想先自己想一想"），这里只做搬运，不自己编。
+   没有可用理由就不显示这一条——不为 UI 虚构思考。 */
+const MODE_TEXT = {
+  hint_first: '先给提示，没卡住就不给完整答案',
+  ask_first: '先问了一句确认',
+  direct: '直接回答',
+};
+
+/* 处理摘要该不该出现：必须有**真实**的东西可说。
+   什么都不知道的时候硬显示"已分析你的问题"就是假装自己有想法。 */
+function traceSteps(reply) {
   const r = reply || {};
+  const steps = [];
+  const j = r.judgment || {};
+  const reasons = Array.isArray(j.reasons) ? j.reasons.filter(Boolean) : [];
+
+  // ① 为什么这么做——后端已翻成人话，这里只搬运
+  if (j.response_mode && MODE_TEXT[j.response_mode]) {
+    steps.push(MODE_TEXT[j.response_mode]);
+  }
+  reasons.forEach(t => steps.push(t));
+
+  // ② 参考了什么——只有真的参考了才说
+  const n = (r.context_used || []).length;
+  if (n > 0) {
+    const k = (r.hypotheses_used || []).length;
+    steps.push(k > 0
+      ? '参考了你的 ' + n + ' 条相关记忆，其中有 ' + k + ' 条我形成的理解'
+      : '参考了你此前的 ' + n + ' 条相关记忆');
+  }
+
+  // ③ 状态说明——只在该说的时候说
+  if (r.paused) steps.push('当前处于暂停状态，本次未记录');
+  if (r.verification_question) steps.push('顺便问了你一个小问题');
+
+  return steps;
+}
+
+function buildTrace(reply) {
+  const steps = traceSteps(reply);
+  // 没有可靠来源就整个不显示。宁可没有，不要编。
+  if (!steps.length) return null;
   const box = document.createElement('details');
   box.className = 'trace';
   const head = document.createElement('summary');
   head.textContent = '处理摘要';
   box.appendChild(head);
-
-  const steps = ['已分析你的问题'];
-  const memN = (r.context_used || []).length;
-  steps.push(memN > 0
-    ? '已参考你此前的 ' + memN + ' 条相关记忆'
-    : '本次没有用到过往记忆');
-  if (r.paused) steps.push('当前处于暂停状态，本次未记录');
-  steps.push('已完成回答');
-
   const ul = document.createElement('ul');
   steps.forEach(t => {
     const li = document.createElement('li');
@@ -1177,7 +1275,8 @@ async function sendMsg() {
     // 正文只有回答本身。approach / deposit / 分类 / 字段名一律不进正文，
     // 收进默认收起的"处理摘要"（只讲做了哪几步，不讲内部怎么判的）。
     div.textContent = r.answer || full;
-    div.appendChild(buildTrace(r));
+    const tr = buildTrace(r);
+    if (tr) div.appendChild(tr);
     hint.hidden = true;
     loadContext(); loadHypos(); loadStatus(); loadUnderstanding(); loadWarmup(); loadThinking();
     window.__paiTTFT = firstAt ? (firstAt - t0) : 0;
@@ -1242,64 +1341,84 @@ $('btnCtxHistory').addEventListener('click', async () => {
   } catch (e) { box.innerHTML = '<span class="tag">读取失败</span>'; box.hidden = false; }
 });
 
-/* ---------- 待验证假设（V0.3：事实与假设视觉分开） ---------- */
-const HYPO_STATUS = { tentative: '待验证', confirmed: '用户已确认', rejected: '已否决', deleted: '已删除' };
-const HYPO_POL = { support: '支持', contradict: '反证' };
+/* ---------- 待验证候选（产品语言；状态文案由后端 candidate_view 给） ----------
+   原先这里是两张内部状态/极性的查表映射，卡片化后不再需要——
+   也不该需要：状态和证据强度都由后端翻成人话再过来。 */
 
 async function loadHypos() {
   try {
-    const r = await api('/api/hypotheses');
-    $('hypoEmpty').hidden = r.items.length > 0;
-    $('hypoList').innerHTML = r.items.map(h => `
-      <li class="mem">
-        <span class="when">🔍 ${esc(HYPO_STATUS[h.status] || h.status)} · 置信度 ${Math.round(Number(h.confidence) * 100)}%</span>
-        <span class="desc">${esc(h.statement)}
-          <small>范围：${esc(h.scope)} · 支持 ${h.support_count} · 反证 ${h.contradict_count} · 已参与回答 ${h.used_count} 次</small>
-          <small class="hypev" hidden></small>
-        </span>
-        <span>
-          <button data-hypo-ev="${esc(h.id)}">证据</button>
-          <button data-hypo-ok="${esc(h.id)}">确认</button>
-          <button data-hypo-no="${esc(h.id)}">否决</button>
-          <button data-hypo-del="${esc(h.id)}">删除</button>
-        </span>
-      </li>`).join('');
-    $('hypoList').querySelectorAll('[data-hypo-ev]').forEach(b =>
-      b.addEventListener('click', async () => {
-        const box = b.closest('li').querySelector('.hypev');
-        if (!box.hidden) { box.hidden = true; return; }
-        try {
-          const d = await api('/api/hypotheses/' + b.dataset.hypoEv);
-          const ev = d.hypothesis.evidence || [];
-          box.innerHTML = ev.length
-            ? ev.map(e => `<span class="tag">${esc(HYPO_POL[e.polarity] || e.polarity)} · ${esc(e.source_type)}：${esc((e.excerpt || '').slice(0, 60))}</span>`).join('')
-            : '<span class="tag">暂无证据</span>';
-        } catch (e) { box.innerHTML = '<span class="tag">读取失败</span>'; }
-        box.hidden = false;
-      }));
-    $('hypoList').querySelectorAll('[data-hypo-ok]').forEach(b =>
-      b.addEventListener('click', async () => {
-        const r = await api('/api/hypotheses/' + b.dataset.hypoOk + '/confirm', { method: 'POST' });
-        if (r && r.ok === false) { alert('确认失败：这条假设可能已被删除'); return; }
-        loadHypos();
-      }));
-    $('hypoList').querySelectorAll('[data-hypo-no]').forEach(b =>
-      b.addEventListener('click', async () => {
-        const reason = prompt('它哪里猜错了？（会作为反证记下来）', '');
-        if (reason === null) return;
-        const r = await api('/api/hypotheses/' + b.dataset.hypoNo + '/reject',
-          { method: 'POST', body: JSON.stringify({ reason: reason.trim() }) });
-        if (r && r.ok === false) { alert('否决失败：这条假设可能已被删除'); return; }
-        loadHypos(); loadStatus();
-      }));
-    $('hypoList').querySelectorAll('[data-hypo-del]').forEach(b =>
-      b.addEventListener('click', async () => {
-        if (!confirm('删除这条假设？删除后它不会再用这条假设辅助判断。')) return;
-        const r = await api('/api/hypotheses/' + b.dataset.hypoDel, { method: 'DELETE' });
-        if (r && r.ok === false) { alert('删除失败：这条假设可能已被删除'); return; }
-        loadHypos(); loadStatus();
-      }));
-  } catch (e) { /* 静默 */ }
+    const v = await api('/api/candidates');
+    const pending = v.pending || [], watching = v.watching || [],
+          settled = v.settled || [];
+    $('hypoEmpty').hidden = pending.length + watching.length > 0;
+    $('hypoSettledWrap').hidden = settled.length === 0;
+    $('hypoSettledCount').textContent = settled.length
+      ? '已处理 ' + settled.length + ' 条' : '';
+
+    $('hypoList').innerHTML =
+      pending.map(candCard).join('') + watching.map(candCard).join('');
+    $('hypoSettledList').innerHTML = settled.map(candCard).join('');
+
+    candWire($('hypoList'));
+    candWire($('hypoSettledList'));
+
+    const b = $('hypoBadge');
+    if (b) b.textContent = String((v.counts && v.counts.pending) || 0);
+  } catch (e) { /* 静默：展示层坏掉不许挡住聊天 */ }
+}
+
+/* 待验证卡片。人话，没有一个内部字段。
+   视觉向「我眼中的你」靠拢（同卡片语言），但用实线边框+更强主标题标记
+   "这里需要你动手"——三者一眼能分：稳定理解 / 后台猜测 / 待你判断。 */
+function candCard(c) {
+  const quotes = (c.quotes || []).map(q =>
+    `<div class="cev"><span class="cevw">${esc(q.when)}</span>${esc(q.text)}</div>`).join('');
+  const why = quotes
+    ? `<button class="cwhy" data-why>为什么会这样想？</button>
+       <div class="cwhybox" hidden>${quotes}<div class="ctail">${esc(c.why_tail)}</div></div>`
+    : `<div class="cnoev">这条我还没有找到你说过的话。</div>`;
+  const acts = c.can_act
+    ? `<div class="cacts">
+         <button class="ok" data-cok="${esc(c.id)}">对</button>
+         <button class="no" data-cno="${esc(c.id)}">不对</button>
+       </div>`
+    : '';
+  return `<li class="ccard c-${esc(c.bucket)}">
+    <div class="ctopic">${esc(c.topic)}</div>
+    <div class="cstate"><span class="cbadge b-${esc(c.bucket)}">${esc(c.state_text)}</span>${
+      c.when ? '<span class="cwhen">' + esc(c.when) + '</span>' : ''}</div>
+    <div class="cabout">${esc(c.about)}</div>
+    ${why}
+    ${acts}
+  </li>`;
+}
+
+function candWire(scope) {
+  // 依据折叠
+  scope.querySelectorAll('[data-why]').forEach(b => b.addEventListener('click', () => {
+    const box = b.nextElementSibling;
+    box.hidden = !box.hidden;
+    b.textContent = box.hidden ? '为什么会这样想？' : '收起依据';
+  }));
+  // "对" = 值得继续观察，不是"这就是事实"。所以不给确认弹窗，避免语义说重。
+  scope.querySelectorAll('[data-cok]').forEach(b =>
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      const r = await api('/api/hypotheses/' + b.dataset.cok + '/confirm',
+        { method: 'POST' });
+      if (r && r.ok === false) { b.disabled = false; alert('这条可能已经被处理过了。'); return; }
+      loadHypos(); loadStatus();
+    }));
+  scope.querySelectorAll('[data-cno]').forEach(b =>
+    b.addEventListener('click', async () => {
+      const reason = prompt('它哪里猜错了？（会作为反证记下来）', '');
+      if (reason === null) return;
+      b.disabled = true;
+      const r = await api('/api/hypotheses/' + b.dataset.cno + '/reject',
+        { method: 'POST', body: JSON.stringify({ reason: reason.trim() }) });
+      if (r && r.ok === false) { b.disabled = false; alert('这条可能已经被处理过了。'); return; }
+      loadHypos(); loadStatus();
+    }));
 }
 
 $('btnHypoRefresh').addEventListener('click', loadHypos);
@@ -1780,15 +1899,12 @@ setInterval(loadStatus, 15000);
     dot.classList.toggle('thinking', /慢/.test(t));
     dot.title = t;
   };
+  // 这里原本还顺手用 .mem 数量覆盖徽章——卡片化之后 .mem 已经不存在了，
+  // 于是徽章恒为 0，而主列表明明还有待验证项。
+  // 徽章现在由 loadHypos 自己从 counts.pending 写，这里不再插手。
   var _lh = loadHypos;
   loadHypos = async function () {
     try { await _lh(); } catch (e) {}
-    try {
-      var n = document.getElementById('hypoList')
-        .querySelectorAll('.mem').length;
-      var hb = document.getElementById('hypoBadge');
-      if (hb) hb.textContent = n;
-    } catch (e) {}
   };
   // 发送时 Composer 轻呼吸（生命感）
   var _send = sendMsg;

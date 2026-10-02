@@ -301,11 +301,20 @@ def test_hypotheses_full_flow(client):
 
 
 def test_hypotheses_ui_block_present(client):
-    """H5-UI：首页含有独立假设区块（与④视觉分开），JS 接线存在。"""
+    """H5-UI：首页含有独立假设区块（与④视觉分开），JS 接线存在。
+
+    断言按**本意**写：区块还在、还是独立一块、JS 还接着。
+    标题措辞改过（现在是"这些是我的猜测"），所以不钉具体字串——
+    钉字串的话改个文案就得改测试，而它守的其实不是那串字。
+    """
     c, _, _ = client
     html = c.get("/").text
-    assert "待验证假设" in html
+    assert 'id="pane-hypo"' in html, "待验证仍是独立的一块"
+    assert "这些是我的猜测" in html, "待验证区块仍有自己的说明头"
     assert "hypoList" in html and "loadHypos" in html
+    # 卡片化：容器是卡片网格，且有独立的已处理区
+    assert 'class="ccards"' in html
+    assert "hypoSettledList" in html, "已处理的候选要有独立位置，不占主列表"
     # ④ 信任界面不受影响
     assert "它对你的理解" in html
 

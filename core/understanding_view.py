@@ -64,9 +64,13 @@ _PLAIN_RULES = (
 )
 
 # 会暴露内部结构的词，一个都不许出现在输出里
+# 注意 scope= / source_id 带符号或完整词：裸 "scope" 会误伤
+# "作用域"这类正常中文，而 source_id 裸写容易和 source_type 混淆。
 FORBIDDEN_IN_OUTPUT = (
-    "confidence", "source_type", "hypothesis_id", "quota_overflow",
+    "confidence", "source_type", "source_id", "hypothesis_id", "scope=",
+    "quota_overflow",
     "background:", "activity:", "interaction:", "inferred:", "correction",
+    "system prompt", "developer prompt", "chain-of-thought",
 )
 
 

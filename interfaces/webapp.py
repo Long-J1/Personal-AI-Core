@@ -668,6 +668,49 @@ def create_app(
         found = hypothesis_store.restore_entry(hypo_id)
         return {"ok": found, "found": found}
 
+    # ---------- 待验证候选（产品语言投影）----------
+    @app.get("/api/candidates")
+    def get_candidates() -> dict:
+        """把候选猜测翻译成用户看得懂的话。
+
+        与 /api/hypotheses 的区别：那个是诊断面（置信度、scope、证据来源
+        都是给检查系统的人看的），这个是**体验面**——只有人话、时间、
+        和用户自己的原话。
+
+        主列表只放需要用户注意的（待验证）；已认可/已处理的收进折叠区，
+        不长期占位置。
+        """
+        from core.candidate_view import (
+            assert_no_internal_fields,
+            build_view,
+        )
+
+        details = {}
+        try:
+            rows = hypothesis_store.list_hypotheses(live_only=False)
+        except Exception as exc:
+            log.warning("读取候选失败（待验证面板可能为空）：%s", exc)
+            rows = []
+        for h in rows:
+            try:
+                d = hypothesis_store.get_detail(h.id)
+            except Exception as exc:
+                log.warning("读取候选详情失败（跳过 %s）：%s", h.id[:8], exc)
+                continue
+            if d:
+                details[h.id] = d
+        try:
+            view = build_view(rows, details)
+        except Exception as exc:
+            log.warning("待验证投影失败（返回空面板，不掀翻页面）：%s", exc)
+            return {"pending": [], "watching": [], "settled": [],
+                    "counts": {"pending": 0, "watching": 0, "settled": 0}}
+        # 泄漏自检：产品面出现内部字段即记 ERROR
+        for k in ("pending", "watching", "settled"):
+            for leak in assert_no_internal_fields(view[k]):
+                log.error("待验证泄漏内部字段 [%s]：%s", k, leak)
+        return view
+
     # ---------- 第一次被理解（V0.5.7：产品语言的"我眼中的你"）----------
     @app.get("/api/understanding")
     def get_understanding() -> dict:
