@@ -182,8 +182,11 @@ def test_feedback_scenario_context_changes_judgment(conversation, context_store)
     assert r1.approach == ["default"]
     assert r1.answer == "这道题的答案是 42。"                # 默认：直接给答案
     section1 = directive_section(answer_prompts(mock)[0])
-    assert "（暂无）" in section1                            # 指令段是空的
+    # Adaptive Judgment 之后指令段不再是空的：它会带上本次的执行策略。
+    # 这里断言的是**本意**——没有任何用户原话指令。
     assert BehaviorMock.DIRECTIVE not in section1
+    assert "- " not in section1, f"不该有用户原话指令：{section1!r}"
+    assert "【本次回应方式】" in section1
 
     # ---- ② 用户纠正 → Context 更新 ----
     mock.text_queue = [

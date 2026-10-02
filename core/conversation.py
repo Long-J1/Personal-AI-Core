@@ -112,6 +112,7 @@ class ChatReply:
     hypotheses_used: list[dict] | None = None  # V0.3：本次进入 Prompt 的假设
     verification_question: dict | None = None  # V0.4：本轮附带的问题，无则 None
     patterns_used: list[dict] | None = None  # V0.5：本次进入 Prompt 的规律
+    judgment: dict | None = None          # Adaptive Judgment：本次怎么回应
 
     def to_dict(self) -> dict:
         return {
@@ -125,6 +126,7 @@ class ChatReply:
             "hypotheses_used": self.hypotheses_used or [],
             "verification_question": self.verification_question,
             "patterns_used": self.patterns_used or [],
+            "judgment": self.judgment,
         }
 
 
@@ -209,10 +211,62 @@ class ConversationService:
             log.warning("写服务状态缓存失败（忽略）：%s", exc)
 
     # ---------- 组装 ----------
+    def _collect_understandings(self, *, hyps=None, pats=None,
+                                goals=None) -> list:
+        """把各 store 里可能影响判断的理解收成统一形状。
+
+        取数在这里，判断在 judgment.py——那个模块是纯逻辑，好测。
+        韧性：任一 store 读失败只丢那一类，不掀翻对话。
+
+        **性能**：假设/规律/目标直接复用 _assemble 已经取到的那几份，
+        不再各查一次。每个 store 的 _connect() 都有固定开销
+        （每次连接都执行 PRAGMA journal_mode=WAL，实测约 7.7ms），
+        多查一轮就是每轮白给 20~30ms，而这一段在模型调用**之前**，
+        全额压在首字时间上。只有相处偏好需要单独取——它不能靠话题
+        检索碰运气（用户上个月说的规矩不该因为这轮没检索到就失效）。
+        """
+        from .judgment import Understanding
+
+        out = []
+        # 相处偏好：用户自己的原话，按可信度过滤
+        try:
+            for e in self.ctx.list_entries(kind="interaction", limit=100):
+                out.append(Understanding(text=e.content, kind="context",
+                                        status=e.memory_status,
+                                        grade=e.source_grade, scope=""))
+        except Exception as exc:
+            log.warning("读取相处偏好失败（跳过）：%s", exc)
+        # 假设 / 规律 / 目标：复用已取到的，不额外查询
+        for h in (hyps or []):
+            out.append(Understanding(text=h.statement, kind="hypothesis",
+                                    status=h.status, grade="",
+                                    scope=h.scope))
+        for p in (pats or []):
+            out.append(Understanding(text=p.statement, kind="pattern",
+                                    status=p.status, grade="", scope=p.scope))
+        for g in (goals or []):
+            out.append(Understanding(text=g.title, kind="goal",
+                                    status=g.status, grade="", scope="goal"))
+        return out
+
+    def _judge_now(self, message: str, **kw):
+        """Adaptive Judgment：正式理解 + 当前这句 → 这一次怎么回应。
+
+        任何异常都退回默认 direct——判断层不该有能力掀翻对话。
+        """
+        try:
+            from .judgment import judge
+
+            return judge(message, self._collect_understandings(**kw))
+        except Exception as exc:
+            log.warning("Judgment 失败（退回默认直答）：%s", exc)
+            from .judgment import Judgment
+            return Judgment(response_mode="direct")
+
     def _assemble(
         self, session_id: str, entries: list[ContextEntry], message: str,
         no_memorize: bool = False,
-    ) -> tuple[list[dict], list[str], list]:
+    ) -> tuple[list[dict], list[str], list, list, object]:
         from .context import plan_query
 
         directives = derive_directives(entries)
@@ -254,6 +308,25 @@ class ConversationService:
             log.warning("目标读取失败（本轮跳过目标段）：%s", exc)
             goals = []
 
+        # Adaptive Judgment：正式理解 → Judgment → 执行指令。
+        # 这是"理解真的改变行为"的那一步——模型没变，变的是它这次
+        # 被要求怎么做。判断层不写记忆。
+        #
+        # 放在 hyps/pats/goals 取完之后：直接复用这三份，不再查一遍。
+        #
+        # 注意：strategy_directive 只进提示词，**不混进 directives**。
+        # directives 是"用户自己说过的相处方式"，是用户的话；
+        # 策略指令是系统对本次的执行要求。混在一起会让既有
+        # approach 契约（用户原话）变成系统自述。
+        judgment = self._judge_now(message, hyps=hyps, pats=pats, goals=goals)
+        strategy_line = ""
+        try:
+            from .judgment import strategy_directive
+
+            strategy_line = strategy_directive(judgment)
+        except Exception as exc:
+            log.warning("策略指令构造失败（跳过）：%s", exc)
+
         # 近期事件 + 话题命中的更早事件（B1：重提旧事），合并去重
         matched, _ = self._recaller.retrieve(plan_query(message))
         recent = self.store.list_events(limit=self.settings.chat_events_max)
@@ -274,7 +347,11 @@ class ConversationService:
 
         system = CHAT_SYSTEM.format(
             context_block=build_context_block(entries),
-            directives_block="\n".join(f"- {d}" for d in directives) or "（暂无）",
+            directives_block="\n".join(
+                ([f"- {d}" for d in directives] + [strategy_line])
+                if strategy_line
+                else [f"- {d}" for d in directives]
+            ) or "（暂无）",
             events_block="\n".join(e.context_line() for e in events) or "（暂无）",
         )
         if hyps:
@@ -329,7 +406,7 @@ class ConversationService:
             len(pats),
             len(goals),
         )
-        return messages, directives, hyps, pats
+        return messages, directives, hyps, pats, judgment
 
     # ---------- 验证提问选择（假设 → 规律 → 目标，一轮一个）----------
     def _pick_verification(self, message: str):
@@ -444,7 +521,7 @@ class ConversationService:
         # 条数上限不变；prompt 文本格式不动（行为变化只来自顺序）。
         entries = sort_for_prompt(
             self.ctx.list_entries())[: self.settings.context_max_entries]
-        messages, directives, hyps, pats = self._assemble(
+        messages, directives, hyps, pats, judgment_obj = self._assemble(
             sid, entries, message, no_memorize=no_memorize)
         messages.append({"role": "user", "content": message})
 
@@ -471,7 +548,8 @@ class ConversationService:
             sid=sid, message=message, model_answer=answer,
             entries=entries, directives=directives, hyps=hyps, pats=pats,
             verification_in=verification_in, paused=paused,
-            no_memorize=no_memorize, started=started)
+            no_memorize=no_memorize, started=started,
+            judgment_obj=judgment_obj)
 
     async def _amodel_chunks(self, messages, timeout):
         """取模型流：优先 async（真链路），Mock/旧适配器回落同步版。"""
@@ -524,7 +602,7 @@ class ConversationService:
             log.warning("等待后台沉淀失败（继续对话）：%s", exc)
         entries = sort_for_prompt(
             self.ctx.list_entries())[: self.settings.context_max_entries]
-        messages, directives, hyps, pats = self._assemble(
+        messages, directives, hyps, pats, judgment_obj = self._assemble(
             sid, entries, message, no_memorize=no_memorize)
         messages.append({"role": "user", "content": message})
         _t0 = time.perf_counter()
@@ -554,7 +632,8 @@ class ConversationService:
                 sid=sid, message=message, model_answer=model_answer,
                 entries=entries, directives=directives, hyps=hyps, pats=pats,
                 verification_in=verification_in, paused=paused,
-                no_memorize=no_memorize, started=started)
+                no_memorize=no_memorize, started=started,
+                judgment_obj=judgment_obj)
         except ModelError as exc:
             yield {"error": str(exc)}
             return
@@ -747,7 +826,7 @@ class ConversationService:
     def _write_turn(self, *, sid: str, message: str, model_answer: str,
                     entries, directives, hyps, pats,
                     verification_in, paused: bool, no_memorize: bool,
-                    started: float) -> ChatReply:
+                    started: float, judgment_obj=None) -> ChatReply:
         """快速路径：验证提问 + history 追加 → 立即返回。
 
         慢速路径（mark_used + deposit + induce + promote + B-path + goal）
@@ -806,6 +885,7 @@ class ConversationService:
             hypotheses_used=[h.to_public_dict() for h in hyps],
             verification_question=verification_out,
             patterns_used=[p.to_public_dict() for p in pats],
+            judgment=getattr(judgment_obj, "to_dict", lambda: None)(),
         )
         log.info(
             "对话完成 session=%s 判断=%s 沉淀=后台 耗时=%.1fs%s",
