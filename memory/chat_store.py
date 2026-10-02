@@ -87,6 +87,21 @@ class ChatStore:
             ).fetchone()
         return row["id"] if row else None
 
+    def last_activity_epoch(self) -> float | None:
+        """最近一次活动的时间戳（会话表里 updated_epoch 最大值）。
+
+        V0.5.9 idle worker 用它判断"用户停止操作了没有"。
+        表里已有这个字段，所以只是多一个读方法，不改结构。
+        """
+        with closing(self._connect()) as con:
+            row = con.execute(
+                "SELECT updated_epoch FROM conversations"
+                " ORDER BY updated_epoch DESC LIMIT 1"
+            ).fetchone()
+        if not row or row["updated_epoch"] is None:
+            return None
+        return float(row["updated_epoch"])
+
     def get_or_create_session(self, session_id: str | None = None) -> str:
         if session_id:
             with closing(self._connect()) as con:

@@ -175,9 +175,32 @@ def create_app(
     # 暴露给 app.state：诊断 / 测试要看"这台 app 正在跑的那个 conversation"
     app.state.conversation = conversation
 
+    # V0.5.9：用户停止操作后，本地做一次后台整理。
+    # 只在真实运行时启动（默认关，测试与脚本不受影响）。
+    idle_worker = None
+    if getattr(settings, "idle_reasoning_enabled", False):
+        from core.idle_worker import IdleWorker
+
+        idle_worker = IdleWorker(store, hypothesis_store, chat_store)
+    app.state.idle_worker = idle_worker
+
+    @app.on_event("startup")
+    async def _start_idle_worker():
+        if idle_worker is None:
+            return
+        try:
+            idle_worker.start()
+        except Exception as exc:
+            log.warning("idle worker 启动失败（不影响服务）：%s", exc)
+
     @app.on_event("shutdown")
     async def _shutdown():
-        """应用退出：取消后台沉淀任务，不产生孤儿。"""
+        """应用退出：取消后台任务，不产生孤儿。"""
+        if idle_worker is not None:
+            try:
+                await idle_worker.stop()
+            except Exception as exc:
+                log.warning("关闭时停止 idle worker 失败：%s", exc)
         try:
             await conversation.shutdown()
         except Exception as exc:

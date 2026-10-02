@@ -174,7 +174,7 @@ def classify_natural_signal(text: str) -> NaturalSignal:
 # ---------- 话题匹配 ----------
 def related_gram_count(text: str, scope: str) -> int:
     """这句话与该 scope 共享多少个非停用二连字。"""
-    label = scope_label(scope)
+    label = match_label(scope)
     if len(label) < 2:
         return 0
     return len(_content_grams(text) & _content_grams(label))
@@ -182,10 +182,26 @@ def related_gram_count(text: str, scope: str) -> int:
 
 def label_gram_count(scope: str) -> int:
     """该 scope 的标签能产出多少个非停用二连字。"""
-    label = scope_label(scope)
+    label = match_label(scope)
     if len(label) < 2:
         return 0
     return len(_content_grams(label))
+
+
+def match_label(scope: str) -> str:
+    """拿来做话题匹配的标签。
+
+    `scope_label()` 只按**第一个**冒号切分，于是
+    `background:focus_shift:学习` 会得到 `focus_shift:学习` ——
+    规则名混进了标签，gram 全被污染，匹配门槛跟着算错
+    （实测 need 算成 2，实际只共享 1 个"学习"，于是永远匹配不上）。
+
+    所以先把已知的 `background:` 剥掉，再交给 scope_label。
+    """
+    s = str(scope or "").strip()
+    if s.startswith("background:"):
+        s = s[len("background:"):]
+    return scope_label(s)
 
 
 def required_grams(scope: str, *, strict: bool = True) -> int:

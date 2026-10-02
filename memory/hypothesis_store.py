@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 import uuid
 from contextlib import closing
 from datetime import datetime
@@ -33,6 +34,24 @@ CONF_MAX = 1.0
 MIN_INDEPENDENT_FOR_HIGH = 2   # 独立支持源 < 2 → 不许超过 HIGH_CONF_CAP
 HIGH_CONF_CAP = 0.70
 SCOPE_MAX = 120                # scope 写入与查找统一截断（防超长 activity 导致去重 miss）
+
+# ---------- V0.5.9 后台候选生命周期 ----------
+# status 是 TEXT 列，新增状态值**不需要 migration**。
+# 生命周期：pending → accepted → confirmed（毕业成正式理解）
+#           pending/accepted → rejected（用户否定）
+#           pending/accepted → expired（长期无支持，自动淘汰）
+BACKGROUND_PREFIX = "background:"
+PENDING = "pending"
+ACCEPTED = "accepted"
+EXPIRED = "expired"
+# 候选在"多久没有任何动静"之后判为失效。
+# 复用已有的 updated_at_epoch —— 不新增任何列。
+CANDIDATE_STALE_DAYS = 30
+# 语义去重的比较单位（不是整句）：两个 topic 能共享一个非停用二连字就算同一件事
+CANDIDATE_DUP_GRAMS = 1
+# 毕业门槛：直接用既有的 HIGH_CONF_CAP / MIN_INDEPENDENT_FOR_HIGH，
+# 不为后台推理另立一套标准。
+GRADUATE_MIN_INDEP = MIN_INDEPENDENT_FOR_HIGH
 
 # ---------- 状态机 ----------
 STATUSES = ("tentative", "confirmed", "rejected", "deleted")
@@ -887,12 +906,15 @@ class HypothesisStore:
         rejected / deleted 不可复活；quota_overflow 是 V0.5.3 设的安全
         边界（不可验证、不可晋级、不可自然确认），这里一并挡住。
         """
-        if status not in ("tentative", "confirmed"):
+        if status not in ("tentative", "confirmed", ACCEPTED):
             return False
         if (scope or "").startswith("quota_overflow:"):
             return False
-        # V0.5.8：后台推测是 AI 自己的猜测，不能被用户的"对"顺手确认成事实
-        if (scope or "").startswith("background:"):
+        # V0.5.9：pending 是"还没人裁决的猜测"，不许吃自然证据；
+        # accepted 是"用户认可、等真实证据"的候选——这一段正是
+        # 它靠真实用户证据长大的唯一入口，必须放行。
+        if (scope or "").startswith("background:") \
+                and status != ACCEPTED:
             return False
         return True
 
@@ -1039,7 +1061,7 @@ class HypothesisStore:
 
         用户点过"不对"之后就不该再提——`reject()` 把 status 置为
         rejected，本查询用"存在任一非 deleted 记录"来覆盖三种情况：
-        待确认（tentative）、已认可、已否决。都在这儿挡住。
+        待确认（pending）、已认可、已否决。都在这儿挡住。
         """
         scope = (scope or "").strip()[:SCOPE_MAX]
         if not scope:
@@ -1050,31 +1072,74 @@ class HypothesisStore:
                 " LIMIT 1", (scope,)).fetchone()
         return bool(row)
 
-    def create_background_candidate(self, candidate) -> "Hypothesis | None":
-        """把一条后台推测落成 tentative 假设。
+    def is_duplicate_candidate(self, scope: str) -> bool:
+        """语义去重：新推测跟已有的活候选说的是不是同一件事。
 
-        复用既有 create()，不新建表、不加字段——来源信息全部记在
+        精确 scope 去重挡不住换了措辞的重复——三条规则完全可能从
+        同一份行为数据里各说一句话（实测就有：behavior_change 与
+        focus_shift 同时指向"学习"）。
+
+        比的是 **topic**（从 scope 尾部取），不是整句 reason。
+        早先版本比整句，结果模板套话（"最近 7 天有 N 次记录是…"）
+        自己就共享好几个二连字，把"学习"和"编程"误判成同一件事。
+
+        纯内容比较，不调模型——提案链上不引入抖动。
+        """
+        from core.natural_evidence import _content_grams
+
+        topic = str(scope or "").split(":", 2)[-1].strip()
+        grams = _content_grams(topic)
+        if not grams:
+            return False
+        with closing(self._connect()) as con:
+            rows = con.execute(
+                "SELECT scope FROM hypotheses WHERE scope LIKE"
+                " 'background:%' AND status IN (?,?)",
+                (PENDING, ACCEPTED)).fetchall()
+        for r in rows:
+            other = str(r["scope"] or "").split(":", 2)[-1].strip()
+            if not other:
+                continue
+            if grams & _content_grams(other):
+                return True
+        return False
+
+    def create_background_candidate(self, candidate) -> "Hypothesis | None":
+        """把一条后台推测落成 **pending** 候选。
+
+        复用既有表结构，不新建表、不加字段——来源信息全部记在
         hypothesis_log.detail 里（既有 {"rule": ...} 惯例）。
         """
         if self.background_proposed(candidate.scope):
             return None
-        hypo, why = self.create(
-            candidate.reason[:300], candidate.scope,
-            detail={"rule": "background_reasoning",
-                    "type": candidate.type,
-                    "topic": candidate.topic,
-                    "confidence": round(candidate.confidence, 2),
-                    "reason": candidate.reason,
-                    "evidence": list(candidate.evidence),
-                    "detail": dict(candidate.detail)},
-            confidence=candidate.confidence,
-        )
-        if hypo is None:
-            log.info("后台推测落库跳过：%s", why)
+        if self.is_duplicate_candidate(candidate.scope):
             return None
-        log.info("后台推测新增 [%s·%.2f] %s", candidate.type,
-                 candidate.confidence, candidate.reason[:50])
-        return hypo
+        conf = _clamp(candidate.confidence)
+        hypo_id = uuid.uuid4().hex
+        now = _now()
+        with self._lock, closing(self._connect()) as con:
+            with con:
+                con.execute(
+                    "INSERT INTO hypotheses (id, statement, confidence,"
+                    " status, scope, support_count, contradict_count,"
+                    " used_count, created_at_iso, created_at_epoch,"
+                    " updated_at_iso, updated_at_epoch)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (hypo_id, candidate.reason[:300], conf, PENDING,
+                     candidate.scope[:SCOPE_MAX], 0, 0, 0,
+                     now.isoformat(), now.timestamp(),
+                     now.isoformat(), now.timestamp()),
+                )
+                self._log(con, "create", hypo_id, None, conf,
+                          {"rule": "background_reasoning",
+                           "type": candidate.type,
+                           "topic": candidate.topic,
+                           "confidence": round(conf, 2),
+                           "reason": candidate.reason,
+                           "evidence": list(candidate.evidence),
+                           "detail": dict(candidate.detail)})
+        log.info("后台候选新增 [pending·%.2f] %s", conf, candidate.reason[:50])
+        return self.get(hypo_id)
 
     def record_background_verdict(
         self, hypo_id: str, verdict: str, user_text: str = ""
@@ -1117,15 +1182,120 @@ class HypothesisStore:
                                  "signal": "user_correct"},
                                 ensure_ascii=False)),
                 )
+                # 认可 ≠ 成熟：进 accepted，等真实用户证据。
+                # 直接给 confirmed 就等于让后台推理自我确认——
+                # 它提猜测、用户点一下、猜测变事实、进 prompt。安全链就废了。
+                con.execute(
+                    "UPDATE hypotheses SET status=?, updated_at_iso=?,"
+                    " updated_at_epoch=? WHERE id=?",
+                    (ACCEPTED, now.isoformat(), now.timestamp(), hypo_id),
+                )
         ok, err = self.add_evidence(
             hypo_id, "support", "correction", log_id,
             excerpt=user_text or "用户认为这条推测是对的",
             detail={"channel": "background", "signal": "user_correct"},
         )
         if not ok:
-            log.warning("后台推测确认落证据失败：%s", err)
+            log.warning("后台候选认可落证据失败：%s", err)
             return False
+        log.info("后台候选 %s 被认可 → accepted（等真实证据）", hypo_id[:8])
         return True
+
+    # ---------- V0.5.9 成长 / 淘汰 ----------
+    def graduate_candidates(self, *, now: float | None = None) -> list[str]:
+        """把证据足够的 accepted 候选升级为**正式理解**。
+
+        门槛直接用既有的两把尺子，不为后台推理另立标准：
+          - 置信度 ≥ HIGH_CONF_CAP(0.70)。这个数只有在**独立来源 ≥2**
+            时才可能达到（add_evidence 里写死的 cap），所以它本身
+            就蕴含了"至少两个不同日子的真实证据"。
+          - 独立来源数 ≥ MIN_INDEPENDENT_FOR_HIGH(2)。
+
+        毕业动作 = status→confirmed + scope 从 `background:` 换成
+        `inferred:`。换前缀是关键：`background:` 的那 7 处过滤只认
+        前缀，换掉之后它自然进入 prompt / pattern /「我眼中的你」，
+        而不需要在每个地方再加一条例外。
+        """
+        out: list[str] = []
+        if self.paused():
+            return out
+        with closing(self._connect()) as con:
+            rows = con.execute(
+                "SELECT id, scope, confidence FROM hypotheses"
+                " WHERE status=? AND scope LIKE 'background:%'",
+                (ACCEPTED,)).fetchall()
+        for r in rows:
+            if float(r["confidence"]) < HIGH_CONF_CAP:
+                continue
+            if self._independent_origins(r["id"]) < GRADUATE_MIN_INDEP:
+                continue
+            now_s = _now()
+            with self._lock, closing(self._connect()) as con:
+                with con:
+                    con.execute(
+                        "UPDATE hypotheses SET status='confirmed',"
+                        " scope=?, updated_at_iso=?, updated_at_epoch=?"
+                        " WHERE id=? AND status=?",
+                        ("inferred:" + r["scope"].split(":", 1)[-1],
+                         now_s.isoformat(), now_s.timestamp(),
+                         r["id"], ACCEPTED),
+                    )
+                    self._log(con, "promote", r["id"], r["confidence"],
+                              r["confidence"],
+                              {"rule": "graduate",
+                               "from_scope": r["scope"],
+                               "to_scope": "inferred:"})
+            out.append(r["id"])
+            log.info("后台候选 %s 毕业 → 正式理解（独立源达标）", r["id"][:8])
+        return out
+
+    def expire_stale_candidates(
+        self, *, stale_days: int = CANDIDATE_STALE_DAYS,
+        now: float | None = None,
+    ) -> list[str]:
+        """淘汰长期没有任何动静的候选。
+
+        "动静"看已有的 `updated_at_epoch`——add_evidence / 裁决都会
+        刷新它，所以不需要新增任何列。
+
+        淘汰只改状态为 expired，**不删行**：用户确实说过这些话，
+        历史必须可追溯（这是 D022 定下的规矩）。
+        """
+        now_f = time.time() if now is None else now
+        cutoff = now_f - stale_days * 86400
+        out: list[str] = []
+        with closing(self._connect()) as con:
+            rows = con.execute(
+                "SELECT id FROM hypotheses WHERE status IN (?,?)"
+                " AND scope LIKE 'background:%' AND updated_at_epoch < ?",
+                (PENDING, ACCEPTED, cutoff)).fetchall()
+        for r in rows:
+            t = _now()
+            with self._lock, closing(self._connect()) as con:
+                with con:
+                    con.execute(
+                        "UPDATE hypotheses SET status=?, pending_question='',"
+                        " updated_at_iso=?, updated_at_epoch=? WHERE id=?",
+                        (EXPIRED, t.isoformat(), t.timestamp(), r["id"]),
+                    )
+                    self._log(con, "expire", r["id"], None, None,
+                              {"rule": "stale",
+                               "stale_days": stale_days})
+            out.append(r["id"])
+            log.info("后台候选 %s 长期无支持 → expired（%d 天）",
+                     r["id"][:8], stale_days)
+        return out
+
+    def paused(self) -> bool:
+        """隐私暂停标记（与 ContextStore 同口径，读 meta 表）。"""
+        try:
+            with closing(self._connect()) as con:
+                row = con.execute(
+                    "SELECT value FROM meta WHERE key='privacy_paused'"
+                ).fetchone()
+            return bool(row and row["value"] == "1")
+        except Exception:
+            return False
 
     # ---------- 删除 / 恢复 ----------
     def delete_entry(self, hypo_id: str) -> bool:

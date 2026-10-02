@@ -50,19 +50,21 @@ def _paused(ctx_store, hyp_store) -> bool:
 def _eligible_hypotheses(hyp_store) -> list:
     """只取还能被自然证据碰的假设。
 
+    V0.5.9：accepted 候选（用户已认可、等真实证据）**要**能被自然证据
+    支持——这是它长大的唯一路径。pending（还没人裁决）依旧挡住。
+
     store 侧还有一道 _natural_eligible 兜底，这里是第二道——
-    目的是不让 rejected / quota_overflow 浪费话题匹配的计算。
+    目的是不让不该碰的候选浪费话题匹配的计算。
     """
     out = []
-    for h in hyp_store.list_hypotheses(live_only=True,
+    for h in hyp_store.list_hypotheses(live_only=False,
                                        limit=HYP_SCAN_LIMIT):
-        if h.status not in ("tentative", "confirmed"):
+        if h.status not in ("tentative", "confirmed", "accepted"):
             continue
         if (h.scope or "").startswith("quota_overflow:"):
             continue
-        # V0.5.8：后台推测不吃自然证据——AI 的猜测不该被用户随口
-        # 一句话就"确认"成事实，只能由用户显式裁决。
-        if (h.scope or "").startswith("background:"):
+        if (h.scope or "").startswith("background:") \
+                and h.status != "accepted":
             continue
         out.append(h)
     return out

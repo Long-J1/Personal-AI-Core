@@ -29,10 +29,13 @@ UV = os.path.join(REPO, "core", "understanding_view.py")
 
 BR = os.path.join(REPO, "core", "background_reasoning.py")
 BB = os.path.join(REPO, "core", "background_bridge.py")
+IW = os.path.join(REPO, "core", "idle_worker.py")
+NB = os.path.join(REPO, "core", "natural_bridge.py")
 
 TESTS = ["tests/test_natural_evidence.py", "tests/test_natural_scenarios.py",
          "tests/test_understanding_view.py", "tests/test_first_run.py",
-         "tests/test_background_reasoning.py"]
+         "tests/test_background_reasoning.py",
+         "tests/test_background_lifecycle.py"]
 
 # 变异体：(代号, 描述, 文件, 旧文本, 新文本)
 MUTATIONS = [
@@ -102,13 +105,17 @@ MUTATIONS = [
      "            continue",
      "        if False:\n            continue"),
 
-    ("K", "删掉 prompt 安全过滤（后台推测进 prompt）",
+                    ("K", "accepted \u5019\u9009\u4e0d\u80fd\u5403\u81ea\u7136\u8bc1\u636e\u00b7store\u5c42\u72b6\u6001\u767d\u540d\u5355",
      HS,
-     "            if (h.scope or \"\").startswith(\"background:\"):\n"
-     "                continue\n            out.append(h)",
-     "            out.append(h)"),
+     "        if status not in (\"tentative\", \"confirmed\", ACCEPTED):",
+     "        if status not in (\"tentative\", \"confirmed\"):"),
 
-    ("L", "删掉去重守卫（说不对也还会再提）·store层",
+    ("K2", "accepted \u5019\u9009\u4e0d\u80fd\u5403\u81ea\u7136\u8bc1\u636e\u00b7bridge\u5c42\u72b6\u6001\u767d\u540d\u5355",
+     NB,
+     "        if h.status not in (\"tentative\", \"confirmed\", \"accepted\"):",
+     "        if h.status not in (\"tentative\", \"confirmed\"):"),
+
+("L", "删掉去重守卫（说不对也还会再提）·store层",
      HS,
      "        if self.background_proposed(candidate.scope):\n            return None",
      "        if False:\n            return None"),
@@ -123,6 +130,34 @@ MUTATIONS = [
      "        if not str(row[\"scope\"]).startswith(\"background:\"):\n"
      "            return False\n        if verdict == \"wrong\":",
      "        if verdict == \"wrong\":"),
+
+    # --- V0.5.9 Background Reasoning Lifecycle ---
+
+    ("N", "\u8ba4\u53ef\u540e\u76f4\u63a5 confirmed\uff08\u81ea\u6211\u786e\u8ba4\uff09",
+     HS,
+     "                    (ACCEPTED, now.isoformat(), now.timestamp(), hypo_id),",
+     "                    (\"confirmed\", now.isoformat(), now.timestamp(), hypo_id),"),
+
+    ("O", "\u6bd5\u4e1a\u4e0d\u68c0\u67e5\u72ec\u7acb\u6e90\u6570\uff08\u4e00\u4e2a\u6765\u6e90\u5c31\u80fd\u6bd5\u4e1a\uff09",
+     HS,
+     "            if self._independent_origins(r[\"id\"]) < GRADUATE_MIN_INDEP:\n                continue",
+     "            if False:\n                continue"),
+
+    ("P", "\u6dd8\u6c70\u65f6\u95f4\u9608\u503c\u5931\u6548\uff08\u521a\u63d0\u7684\u4e5f\u6dd8\u6c70\uff09",
+     HS,
+     "                (PENDING, ACCEPTED, cutoff)).fetchall()",
+     "                (PENDING, ACCEPTED, 0.0)).fetchall()"),
+
+    ("Q", "\u8bed\u4e49\u53bb\u91cd\u5931\u6548\uff08\u540c\u4e00\u4ef6\u4e8b\u63a8\u4e24\u904d\uff09",
+     HS,
+     "            if grams & _content_grams(other):\n                return True",
+     "            if False and grams & _content_grams(other):\n                return True"),
+
+    ("R", "idle \u51b7\u5374\u5931\u6548\uff08\u6bcf\u505c\u4e00\u6b21\u5c31\u6574\u7406\u4e00\u6b21\uff09",
+     IW,
+     "        if now - self._last_run < self.cooldown_seconds:",
+     "        if False:"),
+
 ]
 
 

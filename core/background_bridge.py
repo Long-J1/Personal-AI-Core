@@ -76,14 +76,19 @@ def run_background_reasoning(memory_store, hyp_store, *,
 
 
 def list_background_candidates(hyp_store) -> list:
-    """待用户裁决的后台推测（供 UI 展示）。"""
+    """待用户裁决 / 已认可待成长的后台候选（供 UI 展示）。
+
+    V0.5.9：pending 与 accepted 都不在 LIVE_STATUSES 里，所以必须
+    用 live_only=False 再自己按状态筛。
+    """
     if hyp_store is None:
         return []
     out = []
     try:
-        for h in hyp_store.list_hypotheses(live_only=True, limit=200):
-            if str(h.scope or "").startswith(BACKGROUND_PREFIX):
+        for h in hyp_store.list_hypotheses(live_only=False, limit=200):
+            if str(h.scope or "").startswith(BACKGROUND_PREFIX) \
+                    and h.status in ("pending", "accepted"):
                 out.append(h)
     except Exception as exc:
-        log.warning("后台推测读取失败（跳过）：%s", exc)
+        log.warning("后台候选读取失败（跳过）：%s", exc)
     return out

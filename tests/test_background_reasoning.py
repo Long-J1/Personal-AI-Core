@@ -244,7 +244,8 @@ def test_run_produces_tentative_candidate(world):
     out = run_background_reasoning(store, hyp, now_epoch=NOW)
     assert out["proposed"], out
     h = hyp.get(out["proposed"][0]["id"])
-    assert h.status == "tentative"
+    # V0.5.9：新推测落库就是 pending（等用户裁决），不是 tentative
+    assert h.status == "pending"
     assert h.scope.startswith(BACKGROUND_PREFIX)
 
 
@@ -262,7 +263,8 @@ def test_background_never_becomes_confirmed(world):
     seed_events(store)
     out = run_background_reasoning(store, hyp, now_epoch=NOW)
     h = hyp.get(out["proposed"][0]["id"])
-    assert h.status == "tentative"
+    assert h.status in ("pending", "accepted")
+    assert h.status != "confirmed"
     assert h.confidence < 0.5
 
 
@@ -291,8 +293,9 @@ def test_background_is_not_naturally_confirmable(world):
     out = run_background_reasoning(store, hyp, now_epoch=NOW)
     hid = out["proposed"][0]["id"]
     apply_natural_signal(ctx, hyp, "对，我就是最近主要在写代码。")
+    # pending 候选还没人裁决，不允许被口头确认
     assert hyp.get(hid).support_count == 0
-    assert hyp.get(hid).status == "tentative"
+    assert hyp.get(hid).status == "pending"
 
 
 def test_background_is_not_asked_about(world):
@@ -328,7 +331,8 @@ def test_user_correct_adds_evidence_but_not_confirmed(world):
     assert hyp.record_background_verdict(hid, "correct", "对的") is True
     h = hyp.get(hid)
     assert h.support_count == 1
-    assert h.status == "tentative", "说对一下就变 confirmed？"
+    # V0.5.9：认可后进 accepted（等真实证据），而不是 confirmed
+    assert h.status == "accepted", "认可一下就变 confirmed？"
     assert h.confidence < 0.5
 
 
@@ -506,7 +510,7 @@ def test_full_story_notices_change_without_touching_old_understanding(world):
     assert out["proposed"], "后台推理没发现时段变化"
     cand = hyp.get(out["proposed"][0]["id"])
     assert cand.scope.startswith(BACKGROUND_PREFIX)
-    assert cand.status == "tentative"
+    assert cand.status == "pending"
     assert cand.confidence < 0.5
 
     # ④ 旧理解一点没被动过

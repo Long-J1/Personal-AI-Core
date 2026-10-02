@@ -53,6 +53,11 @@ class Settings:
 
     # 日志
     log_level: str = os.environ.get("PAI_LOG_LEVEL", "INFO")
+    # V0.5.9 idle reasoning。默认**关闭**：本地跑一个常驻后台循环
+    # 是产品级决定，不该由一次代码升级悄悄带进用户的机器。
+    # 要开：PAI_IDLE_REASONING=1
+    idle_reasoning_enabled: bool = os.environ.get(
+        "PAI_IDLE_REASONING", "0") == "1"
 
     version: str = "0.5.4"
 
