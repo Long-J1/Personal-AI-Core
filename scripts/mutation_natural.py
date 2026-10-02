@@ -25,7 +25,10 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NE = os.path.join(REPO, "core", "natural_evidence.py")
 HS = os.path.join(REPO, "memory", "hypothesis_store.py")
 
-TESTS = ["tests/test_natural_evidence.py", "tests/test_natural_scenarios.py"]
+UV = os.path.join(REPO, "core", "understanding_view.py")
+
+TESTS = ["tests/test_natural_evidence.py", "tests/test_natural_scenarios.py",
+         "tests/test_understanding_view.py", "tests/test_first_run.py"]
 
 # 变异体：(代号, 描述, 文件, 旧文本, 新文本)
 MUTATIONS = [
@@ -56,6 +59,31 @@ MUTATIONS = [
      "        if (scope or \"\").startswith(\"quota_overflow:\"):\n"
      "            return False",
      "        if False:\n            return False"),
+
+    # --- V0.5.7 理解展示链 ---
+    ("E", "泄漏自检失效（内部字段可原样露出）",
+     UV,
+     "    return [w for w in FORBIDDEN_IN_OUTPUT if w in blob]",
+     "    return []"),
+
+    ("F", "取消变化识别（用户改主意也不标记）",
+     UV,
+     "    quote, when = _latest_contradiction(hypo)\n"
+     "    if quote is None:\n"
+     "        quote, when = _latest_change_log(hypo)",
+     "    quote, when = None, \"\""),
+
+    ("G", "无原话也照样展示（凭空造来源）",
+     UV,
+     "        text = (e.get(\"excerpt\") or \"\").strip()\n"
+     "        if not text:\n            continue",
+     "        text = (e.get(\"excerpt\") or \"\").strip()\n"
+     "        if not text:\n            text = \"\u6765\u6e90\u672a\u8bb0\""),
+
+    ("H", "让 quota_overflow 露给用户（越权展示）",
+     UV,
+     "    if s.startswith(\"quota_overflow:\"):\n        return \"\"",
+     "    if False:\n        return \"\""),
 ]
 
 
@@ -140,7 +168,7 @@ def main() -> int:
     if survived or code != 0:
         print(f"  失败：{len(survived)} 个变异存活，还原未通过")
         return 1
-    print("  全部 5 个变异都被测试打中，且源码已还原。")
+    print(f"  全部 {len(results)} 个变异都被测试打中，且源码已还原。")
     return 0
 
 

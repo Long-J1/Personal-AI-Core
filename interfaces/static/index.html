@@ -319,6 +319,59 @@ body > .shell { flex: 1; min-height: 0; display: flex; flex-direction: row; }
   font-size: 12.5px; padding: 5px 9px;
 }
 .dtools button:hover, .tools.ghosty button:hover { color: var(--teal); background: var(--teal-faint); transform: none; }
+/* ---------- 第一次被理解（V0.5.7）----------
+   目标：用户第一次看到"AI 正在慢慢认识我"。
+   只讲产品语言——他自己的话、什么时候说的、AI 怎么理解的。
+   内部字段（置信度/来源类型/假设编号）一律不出现在这里。 */
+.uintro { margin: 0 0 14px; padding: 14px 16px; border-radius: 15px 18px 16px 19px;
+  background: linear-gradient(135deg, var(--teal-faint), var(--rose-soft));
+  border: 1px solid var(--line); }
+.uintro b { display: block; font-size: 15px; color: var(--ink); margin-bottom: 4px; }
+.uintro span { font-size: 12.5px; color: var(--ink-soft); line-height: 1.7; }
+
+.ucards { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 11px; }
+.ucard { background: var(--card-glass); border: 1px solid var(--line);
+  border-radius: 14px 18px 15px 17px; padding: 13px 15px; }
+.ucard.chg { border-color: var(--rose); background: linear-gradient(180deg, var(--rose-soft), transparent 70%); }
+.utopic { font-size: 11.5px; letter-spacing: .06em; color: var(--teal);
+  text-transform: none; margin-bottom: 5px; }
+.usay { font-size: 14.5px; color: var(--ink); line-height: 1.65; }
+.usrc { margin-top: 9px; padding-left: 10px; border-left: 2px solid var(--line);
+  font-size: 12.5px; color: var(--ink-soft); line-height: 1.7; }
+.usrc i { color: var(--ink-faint); font-style: normal; }
+.umeta { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ustate { font-size: 11.5px; padding: 2px 9px; border-radius: 999px;
+  background: var(--teal-soft); color: var(--teal); }
+.ustate.s-learning { background: var(--lilac-soft); color: var(--lilac); }
+.ustate.s-changed { background: var(--rose-soft); color: var(--rose); }
+.ustate.s-dropped { background: var(--sea-deep); color: var(--ink-faint); }
+.uwhen { font-size: 11.5px; color: var(--ink-faint); }
+.unote { margin-top: 8px; font-size: 12.5px; color: var(--rose); line-height: 1.65; }
+.uwhy { margin-top: 9px; font-size: 12px; padding: 4px 11px; border-radius: 999px;
+  border: 1px solid var(--line); background: transparent; color: var(--ink-soft); cursor: pointer; }
+.uwhy:hover { border-color: var(--teal); color: var(--teal); }
+.uwhybox { margin-top: 9px; padding: 11px 13px; border-radius: 12px;
+  background: var(--teal-faint); font-size: 12.5px; color: var(--ink-soft); line-height: 1.8; }
+.uwhybox li { margin: 3px 0; }
+
+/* 首次体验：像 AI 说的话，但不是弹窗 */
+.warmup { margin: 0 0 18px; padding: 16px 18px; border-radius: 16px 20px 17px 21px;
+  background: linear-gradient(135deg, var(--teal-soft), var(--lilac-soft) 70%, var(--rose-soft));
+  border: 1px solid var(--line); }
+.warmup h3 { margin: 0 0 6px; font-size: 16px; color: var(--ink); font-weight: 600; }
+.warmup > p { margin: 0 0 12px; font-size: 13px; color: var(--ink-soft); line-height: 1.7; }
+.wsteps { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.wsteps li { display: flex; align-items: flex-start; gap: 9px; font-size: 13px;
+  color: var(--ink-soft); line-height: 1.6; }
+.wsteps .dot { flex: 0 0 auto; width: 17px; height: 17px; border-radius: 50%;
+  border: 1.5px solid var(--line); background: var(--card-glass);
+  font-size: 10px; line-height: 14px; text-align: center; color: var(--ink-faint); margin-top: 1px; }
+.wsteps li.done { color: var(--ink); }
+.wsteps li.done .dot { background: var(--teal); border-color: var(--teal); color: #fff; }
+.wsteps li.done .wname { text-decoration: none; }
+.wskip { margin-top: 13px; font-size: 12px; background: none; border: none;
+  color: var(--ink-faint); cursor: pointer; padding: 0; text-decoration: underline; }
+
 .memlist { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 9px; }
 .mem { background: var(--card-glass); border: 1px solid var(--line); border-radius: 12px 15px 13px 16px; padding: 10px 13px; display: flex; gap: 10px; align-items: flex-start; }
 .mem .when { font-size: 11px; color: var(--ink-faint); white-space: nowrap; min-width: 76px; padding-top: 3px; }
@@ -456,9 +509,16 @@ h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; 
   </section>
 
   <section class="greet">
+    <div class="warmup" id="warmup" hidden>
+      <h3>聊几句，让我了解你的习惯。</h3>
+      <p>不用填表，像平常说话就行。我会顺着聊，记下那些会影响我怎么配合你的事。</p>
+      <ul class="wsteps" id="warmSteps"></ul>
+      <button class="wskip" id="warmSkip">先跳过，直接聊</button>
+    </div>
     <h1 id="greetWord">Good evening<span class="tint">.</span></h1>
     <p>今天想做些什么？</p>
     <div class="pills">
+      <button class="pill" data-open="understanding">我眼中的你 <b id="undBadge">0</b></button>
       <button class="pill" data-open="memory">AI 记忆 <b id="ctxBadge">0</b></button>
       <button class="pill" data-open="hypo">待验证 <b id="hypoBadge">0</b></button>
       <button class="pill" data-open="history">回忆 <b id="evtBadge">0</b></button>
@@ -533,6 +593,7 @@ h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; 
 <aside class="drawer" id="drawer">
   <header>
     <button class="dtab on" data-pane="memory">记忆</button>
+    <button class="dtab" data-pane="understanding">我眼中的你</button>
     <button class="dtab" data-pane="hypo">待验证</button>
     <button class="dtab" data-pane="history">回忆库</button>
     <button class="dtab" data-pane="observe">观察</button>
@@ -558,6 +619,17 @@ h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; 
         <ul id="weeklyList" class="memlist"></ul>
         <div id="weeklyQ" class="hint" hidden></div>
       </section>
+    </div>
+    <div class="dpane" id="pane-understanding">
+      <div class="uintro">
+        <b>它目前是这样理解你的</b>
+        <span>下面每一条都来自你自己说过的话。没有出处的推测，不会出现在这里。</span>
+      </div>
+      <div class="row tools ghosty"><button id="btnUndRefresh">刷新</button></div>
+      <ul id="undList" class="ucards"></ul>
+      <div id="undEmpty" class="hint" hidden>还没有形成理解。聊几句之后，这里会开始长出东西来。</div>
+      <h2 class="ptitle" id="undChgTitle" hidden>有过变化 <small>你说过的话变了，我跟着改了</small></h2>
+      <ul id="undChgList" class="ucards"></ul>
     </div>
     <div class="dpane" id="pane-hypo">
       <h2 class="ptitle">待验证假设 <small>它的猜测，不是事实——可确认 · 否决 · 删除</small></h2>
@@ -1074,7 +1146,7 @@ async function sendMsg() {
     div.textContent = r.answer || full;
     div.appendChild(buildTrace(r));
     hint.hidden = true;
-    loadContext(); loadHypos(); loadStatus();
+    loadContext(); loadHypos(); loadStatus(); loadUnderstanding(); loadWarmup();
     window.__paiTTFT = firstAt ? (firstAt - t0) : 0;
   } catch (e) {
     div.remove();
@@ -1198,6 +1270,79 @@ async function loadHypos() {
 }
 
 $('btnHypoRefresh').addEventListener('click', loadHypos);
+
+/* ---------- 第一次被理解（V0.5.7）----------
+   产品语言的"我眼中的你"：只有用户自己的话 + 时间 + AI 的说法。
+   刻意不渲染任何内部字段——那是"待验证"面板的职责，不是这里的。 */
+function undCard(r) {
+  const src = (r.quotes || []).map(q =>
+    `<div class="usrc">你说：<i>${esc(q.when)}</i> —— 「${esc(q.text)}」</div>`).join('');
+  return `<li class="ucard${r.changed ? ' chg' : ''}">
+    <div class="utopic">${esc(r.topic)}</div>
+    <div class="usay">${esc(r.about)}</div>
+    ${src}
+    <div class="umeta">
+      <span class="ustate s-${esc(r.state)}">${esc(r.state_text)}</span>
+      <span class="uwhen">${esc(r.formed_on)}形成</span>
+    </div>
+    ${r.change_note ? `<div class="unote">${esc(r.change_note)}</div>` : ''}
+    <button class="uwhy" data-why>为什么这么认为？</button>
+    <div class="uwhybox" hidden></div>
+  </li>`;
+}
+
+function undWire(scope) {
+  scope.querySelectorAll('[data-why]').forEach(b => {
+    b.addEventListener('click', () => {
+      const box = b.nextElementSibling;
+      if (!box.hidden) { box.hidden = true; return; }
+      const card = b.closest('.ucard');
+      const quotes = [...card.querySelectorAll('.usrc')].map(e => e.textContent.trim());
+      const note = card.querySelector('.unote');
+      const parts = [];
+      parts.push('<b>因为这些都是你自己说的：</b>');
+      parts.push(quotes.length
+        ? '<ul>' + quotes.map(q => `<li>${esc(q)}</li>`).join('') + '</ul>'
+        : '<div>这条目前还没有留下原话。</div>');
+      if (note) parts.push('<div>' + esc(note.textContent.trim()) + '</div>');
+      parts.push('<div style="opacity:.72">觉得不对？到「待验证」里可以否决它。</div>');
+      box.innerHTML = parts.join('');
+      box.hidden = false;
+    });
+  });
+}
+
+async function loadUnderstanding() {
+  try {
+    const r = await api('/api/understanding');
+    const items = (r.items || []).filter(x => !x.changed);
+    const changed = r.changed || [];
+    $('undEmpty').hidden = items.length + changed.length > 0;
+    $('undList').innerHTML = items.map(undCard).join('');
+    $('undChgList').innerHTML = changed.map(undCard).join('');
+    $('undChgTitle').hidden = changed.length === 0;
+    if ($('undBadge')) $('undBadge').textContent = String(r.count || 0);
+    undWire($('undList'));
+    undWire($('undChgList'));
+  } catch (e) { /* 静默：展示层坏掉不许挡住聊天 */ }
+}
+$('btnUndRefresh')?.addEventListener('click', loadUnderstanding);
+
+/* 首次体验引导：邀请，不是问卷。状态全从已有数据推导，不落库。 */
+async function loadWarmup() {
+  try {
+    const r = await api('/api/understanding/warmup');
+    const box = $('warmup');
+    if (!box) return;
+    if (!r.active) { box.hidden = true; return; }
+    $('warmSteps').innerHTML = (r.topics || []).map(t =>
+      `<li class="${t.covered ? 'done' : ''}"><span class="dot">${t.covered ? '✓' : ''}</span>
+        <span><span class="wname">${esc(t.name)}</span>${t.covered ? '' : ' · ' + esc(t.ask)}</span></li>`
+    ).join('');
+    box.hidden = false;
+  } catch (e) { /* 静默 */ }
+}
+$('warmSkip')?.addEventListener('click', () => { const b = $('warmup'); if (b) b.hidden = true; });
 
 /* ---------- 过去7天（V0.5 只读 digest） ---------- */
 async function loadWeekly() {
@@ -1366,7 +1511,7 @@ async function loadDataInfo() {
         try {
           const r2 = await api('/api/data/restore', { method: 'POST', body: JSON.stringify({ name: btn.dataset.restore }) });
           dataHint(`已恢复（安全网：${r2.safety_backup || '无'}）· 理解 ${r2.counts?.context_entries ?? '?'} 条 · 记忆 ${r2.counts?.events ?? '?'} 条`, false);
-          loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadChatHistory(); loadModelSettings(); loadDataInfo();
+          loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadUnderstanding(); loadWarmup(); loadChatHistory(); loadModelSettings(); loadDataInfo();
         } catch (e) {
           dataHint(e.message, true);
         } finally { busy(btn, false); }
@@ -1401,7 +1546,7 @@ $('dataImport').addEventListener('change', async (ev) => {
     const r = await res.json().catch(() => null);
     if (!res.ok || !r?.ok) throw new Error(r?.error || ('导入失败（HTTP ' + res.status + '）'));
     dataHint(`导入成功 · 理解 ${r.counts?.context_entries ?? '?'} 条 · 记忆 ${r.counts?.events ?? '?'} 条`, false);
-    loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadChatHistory(); loadModelSettings(); loadDataInfo();
+    loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadUnderstanding(); loadWarmup(); loadChatHistory(); loadModelSettings(); loadDataInfo();
   } catch (e) {
     dataHint(e.message, true);
   }
@@ -1411,7 +1556,7 @@ $('btnDataRefresh').addEventListener('click', loadDataInfo);
 
 betaLoad();
 /* ---------- 初始化 ---------- */
-loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadChatHistory(); loadModelSettings(); loadDataInfo();
+loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadUnderstanding(); loadWarmup(); loadChatHistory(); loadModelSettings(); loadDataInfo();
 setInterval(loadStatus, 15000);
 
 

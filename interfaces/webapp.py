@@ -637,6 +637,86 @@ def create_app(
         found = hypothesis_store.restore_entry(hypo_id)
         return {"ok": found, "found": found}
 
+    # ---------- 第一次被理解（V0.5.7：产品语言的"我眼中的你"）----------
+    @app.get("/api/understanding")
+    def get_understanding() -> dict:
+        """把内部理解翻译成用户看得懂的话。
+
+        与 /api/hypotheses 的区别：那个是诊断面（给要看置信度的人），
+        这个是体验面——**不含任何内部字段**，只有用户自己的话、时间、
+        和 AI 的说法。展示层不做任何猜测，缺证据的项根本不出现。
+        """
+        from core.understanding_view import (
+            assert_no_internal_fields,
+            build_timeline,
+            onboarding_state,
+        )
+
+        details = []
+        try:
+            for h in hypothesis_store.list_hypotheses():
+                d = hypothesis_store.get_detail(h.id)
+                if d:
+                    details.append(d)
+        except Exception as exc:
+            log.warning("读取假设详情失败（时间线可能不完整）：%s", exc)
+
+        entries = []
+        try:
+            # active_only=False：要连 outdated 一起取——用户自己的话变了，
+            # 这是他最该看见的一段历史。视图层自己按 active/memory_status 分流。
+            entries = [e.to_public_dict()
+                       for e in context_store.list_entries(active_only=False,
+                                                            limit=200)
+                       if e.active]
+        except Exception as exc:
+            log.warning("读取理解条目失败（时间线可能不完整）：%s", exc)
+
+        try:
+            chat_count = chat_store.count_messages()
+        except Exception:
+            chat_count = 0
+
+        payload = build_timeline(details, entries)
+        payload["onboarding"] = onboarding_state(
+            chat_count, entries, payload["count"])
+        # 自检：内部字段泄漏到展示层 = 产品事故，当场发现
+        leaked = assert_no_internal_fields(payload)
+        if leaked:
+            log.error("理解时间线泄漏内部字段：%s", leaked)
+        return payload
+
+    @app.get("/api/understanding/warmup")
+    def get_warmup() -> dict:
+        """首次体验的引导语。不存状态——下次还是同一段话。
+
+        刻意不落库、不建表：引导是邀请不是关卡，记下来反而变成负担。
+        """
+        from core.understanding_view import (
+            ONBOARDING_TOPICS,
+            onboarding_state,
+        )
+
+        try:
+            entries = [e.to_public_dict()
+                       for e in context_store.list_entries(active_only=False,
+                                                            limit=200)
+                       if e.active]
+            chat_count = chat_store.count_messages()
+        except Exception:
+            entries, chat_count = [], 0
+        st = onboarding_state(chat_count, entries, 0)
+        return {
+            "active": st["is_first_run"] and not st["done"],
+            "opening": "聊几句，让我了解你的习惯。",
+            "closing": "大致清楚了，之后我会按这个来。",
+            "topics": [
+                {"key": k, "name": n, "ask": a, "covered": c["covered"]}
+                for k, n, a in ONBOARDING_TOPICS
+                for c in st["topics"] if c["key"] == k
+            ],
+        }
+
     # ---------- 规律管理（V0.5：只有 confirmed 进 prompt）----------
     @app.get("/api/patterns")
     def list_patterns() -> dict:
