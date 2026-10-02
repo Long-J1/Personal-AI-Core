@@ -173,17 +173,26 @@ def apply_natural_signal(
 
         # V0.5.10：对话里的"对 / 不对"可以裁决待定候选。
         # 只在信号明确 + 话题强相关时才落下去。
+        #
+        # 裁决过的这一条，**本回合不要再当证据对象**。
+        # 实测踩过：「对，我最近已经改成早上学习了。」这一句
+        # 同时产出了 support（裁决=你认可）和 contradict
+        # （证据扫描=你说变了），同一条候选 conf 0.53→0.28。
+        # 裁决已经把这句话消化过了，再算一遍是重复计数。
+        just_verdicted: set[str] = set()
         try:
             vid = resolve_pending_candidate(hyp_store, user_text or "",
                                             sig.signal)
             if vid:
+                just_verdicted.add(vid)
                 result["verdict_candidate"] = vid
                 result["hypo_ids"].append(vid)
         except Exception as exc:
             log.warning("对话裁决候选异常（跳过）：%s", exc)
 
         exclude = set(exclude_entry_ids or ())
-        hyps = _eligible_hypotheses(hyp_store)
+        hyps = [h for h in _eligible_hypotheses(hyp_store)
+                if h.id not in just_verdicted]
 
         if sig.signal == SIGNAL_SUPPORT:
             targets = rank_hypotheses(user_text or "", hyps)[:max_targets]

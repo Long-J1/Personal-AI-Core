@@ -264,6 +264,33 @@ def test_repeated_wrong_verdict_is_idempotent(world):
     assert h.contradict_count == 1
 
 
+def test_the_accepting_sentence_does_not_also_contradict(world):
+    """soak 撞出来的真 bug，有铁证。
+
+    「对，我最近已经改成早上学习了。」这一句在旧实现里对**同一条**
+    候选产出了两条方向相反的证据：
+
+        support    ← user_correct（裁决路径：用户认可）
+        contradict ← natural_change（证据路径：用户说变了）
+
+    同一条候选 conf 0.53 → 0.28。一句话既认可又否认同一件事。
+
+    根因：裁决把候选推成 accepted 之后，同一回合的证据扫描立刻
+    把它当成 eligible——而这句话已经被裁决消化过一次了。
+    """
+    hyp, ctx = world["hyp"], world["ctx"]
+    c = hyp.create_background_candidate(make_candidate(
+        reason="过去 14 天里「学习」有 5 次发生在晚上，最近 7 天降到 0 次。"
+               "这只是推测，不一定对。",
+        topic="学习", kind="behavior_change"))
+    out = apply_natural_signal(ctx, hyp, "对，我最近已经改成早上学习了。")
+    assert out.get("verdict_candidate")
+    h = hyp.get(c.id)
+    assert h.status == "accepted"
+    assert h.contradict_count == 0, "同一句话又认可又否认"
+    assert h.confidence > 0.4, f"confidence 被自己抵消了：{h.confidence}"
+
+
 def test_store_layer_blocks_natural_evidence_for_pending(world):
     """存储层自己也要挡住 pending。
 
