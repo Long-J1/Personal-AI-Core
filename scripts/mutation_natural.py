@@ -27,8 +27,12 @@ HS = os.path.join(REPO, "memory", "hypothesis_store.py")
 
 UV = os.path.join(REPO, "core", "understanding_view.py")
 
+BR = os.path.join(REPO, "core", "background_reasoning.py")
+BB = os.path.join(REPO, "core", "background_bridge.py")
+
 TESTS = ["tests/test_natural_evidence.py", "tests/test_natural_scenarios.py",
-         "tests/test_understanding_view.py", "tests/test_first_run.py"]
+         "tests/test_understanding_view.py", "tests/test_first_run.py",
+         "tests/test_background_reasoning.py"]
 
 # 变异体：(代号, 描述, 文件, 旧文本, 新文本)
 MUTATIONS = [
@@ -80,10 +84,45 @@ MUTATIONS = [
      "        text = (e.get(\"excerpt\") or \"\").strip()\n"
      "        if not text:\n            text = \"\u6765\u6e90\u672a\u8bb0\""),
 
-    ("H", "让 quota_overflow 露给用户（越权展示）",
+    ("H", "\u8ba9 quota_overflow / background \u9732\u7ed9\u7528\u6237\uff08\u8d8a\u6743\u5c55\u793a\uff09",
      UV,
-     "    if s.startswith(\"quota_overflow:\"):\n        return \"\"",
+     "    if s.startswith(\"quota_overflow:\") or s.startswith(\"background:\"):\n"
+     "        return \"\"",
      "    if False:\n        return \"\""),
+
+    # --- V0.5.8 Background Reasoning ---
+    ("I", "删掉变化检测（时段变了也不说）",
+     BR,
+     "        if not dropped or not gained:\n            continue",
+     "        if False:\n            continue"),
+
+    ("J", "删掉样本量门槛（三个事件也敢讲趋势）",
+     BR,
+     "        if len(old_t) < MIN_EVENTS_PER_WINDOW or len(new_t) < MIN_EVENTS_PER_WINDOW:\n"
+     "            continue",
+     "        if False:\n            continue"),
+
+    ("K", "删掉 prompt 安全过滤（后台推测进 prompt）",
+     HS,
+     "            if (h.scope or \"\").startswith(\"background:\"):\n"
+     "                continue\n            out.append(h)",
+     "            out.append(h)"),
+
+    ("L", "删掉去重守卫（说不对也还会再提）·store层",
+     HS,
+     "        if self.background_proposed(candidate.scope):\n            return None",
+     "        if False:\n            return None"),
+
+    ("L2", "删掉去重守卫·bridge层",
+     BB,
+     "            if hyp_store.background_proposed(c.scope):",
+     "            if False and hyp_store.background_proposed(c.scope):"),
+
+    ("M", "删掉存储层守卫（裁决端点能操作任意假设）",
+     HS,
+     "        if not str(row[\"scope\"]).startswith(\"background:\"):\n"
+     "            return False\n        if verdict == \"wrong\":",
+     "        if verdict == \"wrong\":"),
 ]
 
 

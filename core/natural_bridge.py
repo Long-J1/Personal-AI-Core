@@ -60,6 +60,10 @@ def _eligible_hypotheses(hyp_store) -> list:
             continue
         if (h.scope or "").startswith("quota_overflow:"):
             continue
+        # V0.5.8：后台推测不吃自然证据——AI 的猜测不该被用户随口
+        # 一句话就"确认"成事实，只能由用户显式裁决。
+        if (h.scope or "").startswith("background:"):
+            continue
         out.append(h)
     return out
 

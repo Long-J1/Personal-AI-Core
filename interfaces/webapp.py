@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from typing import Literal
 import re
 import shutil
 import tempfile
@@ -63,6 +64,13 @@ class ConversationRequest(BaseModel):
 
 class ContextUpdateRequest(BaseModel):
     content: str = Field(min_length=1, max_length=500)
+
+
+class BackgroundVerdictRequest(BaseModel):
+    """用户对后台推测的裁决。"""
+
+    verdict: Literal["correct", "wrong"]
+    note: str = ""
 
 
 class HypothesisRejectRequest(BaseModel):
@@ -716,6 +724,62 @@ def create_app(
                 for c in st["topics"] if c["key"] == k
             ],
         }
+
+    # ---------- 我正在思考（V0.5.8：AI 的猜测，不是事实）----------
+    @app.get("/api/background")
+    def list_background() -> dict:
+        """待用户裁决的后台推测。
+
+        刻意与 /api/understanding 分开：那边是用户确认过的理解，
+        这边是 AI 的猜测。混在一起就分不清"我知道的"和"我猜的"——
+        那恰恰是这套系统唯一不能含糊的地方。
+        """
+        from core.background_bridge import list_background_candidates
+        from core.understanding_view import assert_no_internal_fields
+
+        items = []
+        for h in list_background_candidates(hypothesis_store):
+            detail = {}
+            try:
+                detail = hypothesis_store.get_detail(h.id) or {}
+            except Exception as exc:
+                log.warning("后台推测详情读取失败：%s", exc)
+            history = detail.get("history") or []
+            origin = {}
+            for row in history:
+                if row.get("action") != "create":
+                    continue
+                try:
+                    origin = json.loads(row.get("detail") or "{}")
+                except (ValueError, TypeError):
+                    origin = {}
+                break
+            items.append({
+                "id": h.id,
+                "topic": origin.get("topic") or "可能的发现",
+                "type": origin.get("type") or "background",
+                "reason": origin.get("reason") or h.statement,
+                "evidence": origin.get("evidence") or [],
+                "asked_on": (h.created_at.strftime("%Y-%m-%d")
+                             if hasattr(h, "created_at") else ""),
+                "caveat": "这只是根据你的行为推测出的可能变化，不一定正确。",
+            })
+        payload = {"items": items, "total": len(items)}
+        leaked = assert_no_internal_fields(payload)
+        if leaked:
+            log.error("后台推测泄漏内部字段：%s", leaked)
+        return payload
+
+    @app.post("/api/background/{hypo_id}/verdict")
+    def background_verdict(hypo_id: str,
+                           req: BackgroundVerdictRequest) -> dict:
+        """用户裁决：correct 只补证据，wrong 落否决从此不再提。"""
+        ok = hypothesis_store.record_background_verdict(
+            hypo_id, req.verdict, req.note or "")
+        if not ok:
+            return JSONResponse({"ok": False, "error": "这条推测不存在或已处理"},
+                                status_code=404)
+        return {"ok": True, "verdict": req.verdict}
 
     # ---------- 规律管理（V0.5：只有 confirmed 进 prompt）----------
     @app.get("/api/patterns")

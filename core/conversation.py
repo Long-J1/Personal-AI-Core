@@ -633,6 +633,19 @@ class ConversationService:
                     log.info("晋升：新建规律 %d 条", len(promoted))
             except Exception as exc:
                 log.warning("晋升失败（跳过）：%s", exc)
+            # 后台推理（V0.5.8）
+            # 位置在晋升之后：后台推测恒为 tentative，本来也进不了
+            # 本轮 promote 的 confirmed 分组；放后面语义更干净——
+            # 它只看已有的东西，不参与本轮任何判断。
+            try:
+                from .background_bridge import run_background_reasoning
+
+                bg = run_background_reasoning(self.store, self.hyp)
+                if bg.get("proposed"):
+                    log.info("后台推理提出 %d 条待验证推测",
+                             len(bg["proposed"]))
+            except Exception as exc:
+                log.warning("后台推理失败（跳过，不影响对话）：%s", exc)
             # B 路径
             try:
                 if is_pattern_declaration(message):

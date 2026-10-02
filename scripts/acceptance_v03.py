@@ -127,7 +127,10 @@ def main() -> int:
         d2 = c.get(f"/api/hypotheses/{hid}").json()["hypothesis"]
         if d2["status"] != "rejected" or d2["confidence"] != 0.25:
             fail(f"否决后状态不对：{d2['status']}/{d2['confidence']}")
-        if c.get("/api/hypotheses").json()["total"] != 1:
+        # V0.5.8：库里可能同时存在后台推测（V0.5.8 新增），所以不能断言
+        # 总数——只断言"被否决的那一条不在列表里"，那才是这一步的本意。
+        listed = [i["id"] for i in c.get("/api/hypotheses").json()["items"]]
+        if hid in listed:
             fail("被否决假设仍在列表里")
         ok("H4/H5 否决链：rejected + 0.25 + 移出列表")
 
@@ -142,11 +145,14 @@ def main() -> int:
         ok("确认只改状态不动置信度")
 
         # 7. 删除/恢复
+        #    V0.5.8：库里可能有后台推测，不再断言总数，只看这一条在不在。
         c.delete(f"/api/hypotheses/{other['id']}")
-        if c.get("/api/hypotheses").json()["total"] != 0:
+        ids = [i["id"] for i in c.get("/api/hypotheses").json()["items"]]
+        if other["id"] in ids:
             fail("删除后仍可见")
         post(c, f"/api/hypotheses/{other['id']}/restore")
-        if c.get("/api/hypotheses").json()["total"] != 1:
+        ids = [i["id"] for i in c.get("/api/hypotheses").json()["items"]]
+        if other["id"] not in ids:
             fail("恢复后不可见")
         ok("删除/恢复闭环")
 

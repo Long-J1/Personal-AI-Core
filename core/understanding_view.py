@@ -66,7 +66,7 @@ _PLAIN_RULES = (
 # 会暴露内部结构的词，一个都不许出现在输出里
 FORBIDDEN_IN_OUTPUT = (
     "confidence", "source_type", "hypothesis_id", "quota_overflow",
-    "activity:", "interaction:", "inferred:", "correction",
+    "background:", "activity:", "interaction:", "inferred:", "correction",
 )
 
 
@@ -131,8 +131,11 @@ def topic_name(scope: str) -> str:
     s = (scope or "").strip()
     if not s:
         return "关于你"
-    if s.startswith("quota_overflow:"):
-        return ""                       # 安全边界：不露出
+    # quota_overflow：V0.5.3 的"不可验证"边界
+    # background：V0.5.8 的 AI 猜测——它有自己独立的「我正在思考」，
+    # 混进"我眼中的你"就是把猜测伪装成理解。这两处都不许露出。
+    if s.startswith("quota_overflow:") or s.startswith("background:"):
+        return ""
     if ":" in s:
         prefix, _, label = s.partition(":")
         label = label.strip()

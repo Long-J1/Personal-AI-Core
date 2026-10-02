@@ -372,6 +372,29 @@ body > .shell { flex: 1; min-height: 0; display: flex; flex-direction: row; }
 .wskip { margin-top: 13px; font-size: 12px; background: none; border: none;
   color: var(--ink-faint); cursor: pointer; padding: 0; text-decoration: underline; }
 
+/* ---------- 我正在思考（V0.5.8）----------
+   这是 AI 的猜测，不是用户的理解。视觉上刻意做得比"我眼中的你"
+   更轻、更虚、更像草稿——不能让猜测看起来像事实。 */
+.bgintro { margin: 0 0 14px; padding: 14px 16px; border-radius: 15px 18px 16px 19px;
+  background: linear-gradient(135deg, var(--lilac-soft), var(--sea-deep));
+  border: 1px dashed var(--lilac); }
+.bgintro b { display: block; font-size: 14px; color: var(--ink); margin-bottom: 4px; }
+.bgintro span { font-size: 12.5px; color: var(--ink-soft); line-height: 1.7; }
+.bgcards { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 11px; }
+.bgcard { background: var(--card-glass); border: 1px dashed var(--lilac);
+  border-radius: 14px 18px 15px 17px; padding: 13px 15px; opacity: .92; }
+.bgtype { font-size: 11.5px; letter-spacing: .06em; color: var(--lilac); margin-bottom: 5px; }
+.bgreason { font-size: 14px; color: var(--ink); line-height: 1.7; }
+.bgev { margin-top: 9px; padding-left: 10px; border-left: 2px dashed var(--line);
+  font-size: 12.5px; color: var(--ink-soft); line-height: 1.7; }
+.bgcaveat { margin-top: 9px; font-size: 12px; color: var(--ink-faint); line-height: 1.6; }
+.bgacts { margin-top: 11px; display: flex; gap: 7px; flex-wrap: wrap; }
+.bgacts button { font-size: 12px; padding: 4px 13px; border-radius: 999px;
+  border: 1px solid var(--line); background: transparent; color: var(--ink-soft); cursor: pointer; }
+.bgacts button.ok:hover { border-color: var(--ok); color: var(--ok); }
+.bgacts button.no:hover { border-color: var(--bad); color: var(--bad); }
+.bgacts button.dim:hover { border-color: var(--ink-faint); color: var(--ink-faint); }
+
 .memlist { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 9px; }
 .mem { background: var(--card-glass); border: 1px solid var(--line); border-radius: 12px 15px 13px 16px; padding: 10px 13px; display: flex; gap: 10px; align-items: flex-start; }
 .mem .when { font-size: 11px; color: var(--ink-faint); white-space: nowrap; min-width: 76px; padding-top: 3px; }
@@ -594,6 +617,7 @@ h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; 
   <header>
     <button class="dtab on" data-pane="memory">记忆</button>
     <button class="dtab" data-pane="understanding">我眼中的你</button>
+    <button class="dtab" data-pane="thinking">我正在思考 <b id="bgCount"></b></button>
     <button class="dtab" data-pane="hypo">待验证</button>
     <button class="dtab" data-pane="history">回忆库</button>
     <button class="dtab" data-pane="observe">观察</button>
@@ -630,6 +654,15 @@ h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; 
       <div id="undEmpty" class="hint" hidden>还没有形成理解。聊几句之后，这里会开始长出东西来。</div>
       <h2 class="ptitle" id="undChgTitle" hidden>有过变化 <small>你说过的话变了，我跟着改了</small></h2>
       <ul id="undChgList" class="ucards"></ul>
+    </div>
+    <div class="dpane" id="pane-thinking">
+      <div class="bgintro">
+        <b>这些只是猜测</b>
+        <span>根据你的行为推测出的可能变化，不一定正确。你说不对，它就不会再提。</span>
+      </div>
+      <div class="row tools ghosty"><button id="btnBgRefresh">刷新</button></div>
+      <ul id="bgList" class="bgcards"></ul>
+      <div id="bgEmpty" class="hint" hidden>现在没有推测。多聊几天，我看到的东西会慢慢变多。</div>
     </div>
     <div class="dpane" id="pane-hypo">
       <h2 class="ptitle">待验证假设 <small>它的猜测，不是事实——可确认 · 否决 · 删除</small></h2>
@@ -1146,7 +1179,7 @@ async function sendMsg() {
     div.textContent = r.answer || full;
     div.appendChild(buildTrace(r));
     hint.hidden = true;
-    loadContext(); loadHypos(); loadStatus(); loadUnderstanding(); loadWarmup();
+    loadContext(); loadHypos(); loadStatus(); loadUnderstanding(); loadWarmup(); loadThinking();
     window.__paiTTFT = firstAt ? (firstAt - t0) : 0;
   } catch (e) {
     div.remove();
@@ -1344,6 +1377,48 @@ async function loadWarmup() {
 }
 $('warmSkip')?.addEventListener('click', () => { const b = $('warmup'); if (b) b.hidden = true; });
 
+/* ---------- 我正在思考（V0.5.8）：AI 的猜测，不进"我眼中的你" ---------- */
+const BG_TYPE = {
+  behavior_change: '可能的时段变化',
+  habit_drift: '可能的习惯漂移',
+  focus_shift: '可能的投入方向'
+};
+
+async function loadThinking() {
+  try {
+    const r = await api('/api/background');
+    $('bgEmpty').hidden = r.items.length > 0;
+    $('bgList').innerHTML = r.items.map(it => `
+      <li class="bgcard">
+        <div class="bgtype">${esc(BG_TYPE[it.type] || '可能的发现')}</div>
+        <div class="bgreason">${esc(it.reason)}</div>
+        ${(it.evidence || []).length ? `<div class="bgev">依据：${it.evidence.map(e => '「' + esc(e) + '」').join('、')}</div>` : ''}
+        <div class="bgcaveat">${esc(it.caveat)}</div>
+        <div class="bgacts">
+          <button class="ok" data-bg-ok="${esc(it.id)}">正确</button>
+          <button class="no" data-bg-no="${esc(it.id)}">不对</button>
+        </div>
+      </li>`).join('');
+    const n = document.getElementById('bgCount');
+    if (n) n.textContent = r.items.length ? '· ' + r.items.length : '';
+    $('bgList').querySelectorAll('[data-bg-ok]').forEach(b =>
+      b.addEventListener('click', async () => {
+        if (!confirm('记下你说它是对的。注意：这只会留一条证据，不会变成已确认的理解。')) return;
+        await api('/api/background/' + b.dataset.bgOk + '/verdict',
+          { method: 'POST', body: JSON.stringify({ verdict: 'correct' }) });
+        loadThinking();
+      }));
+    $('bgList').querySelectorAll('[data-bg-no]').forEach(b =>
+      b.addEventListener('click', async () => {
+        if (!confirm('记下这条不对，以后不再提。')) return;
+        await api('/api/background/' + b.dataset.bgNo + '/verdict',
+          { method: 'POST', body: JSON.stringify({ verdict: 'wrong' }) });
+        loadThinking(); loadStatus();
+      }));
+  } catch (e) { /* 静默：猜测面板坏掉不许挡住聊天 */ }
+}
+$('btnBgRefresh')?.addEventListener('click', loadThinking);
+
 /* ---------- 过去7天（V0.5 只读 digest） ---------- */
 async function loadWeekly() {
   try {
@@ -1511,7 +1586,7 @@ async function loadDataInfo() {
         try {
           const r2 = await api('/api/data/restore', { method: 'POST', body: JSON.stringify({ name: btn.dataset.restore }) });
           dataHint(`已恢复（安全网：${r2.safety_backup || '无'}）· 理解 ${r2.counts?.context_entries ?? '?'} 条 · 记忆 ${r2.counts?.events ?? '?'} 条`, false);
-          loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadUnderstanding(); loadWarmup(); loadChatHistory(); loadModelSettings(); loadDataInfo();
+          loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadUnderstanding(); loadWarmup(); loadThinking(); loadChatHistory(); loadModelSettings(); loadDataInfo();
         } catch (e) {
           dataHint(e.message, true);
         } finally { busy(btn, false); }
@@ -1546,7 +1621,7 @@ $('dataImport').addEventListener('change', async (ev) => {
     const r = await res.json().catch(() => null);
     if (!res.ok || !r?.ok) throw new Error(r?.error || ('导入失败（HTTP ' + res.status + '）'));
     dataHint(`导入成功 · 理解 ${r.counts?.context_entries ?? '?'} 条 · 记忆 ${r.counts?.events ?? '?'} 条`, false);
-    loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadUnderstanding(); loadWarmup(); loadChatHistory(); loadModelSettings(); loadDataInfo();
+    loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadUnderstanding(); loadWarmup(); loadThinking(); loadChatHistory(); loadModelSettings(); loadDataInfo();
   } catch (e) {
     dataHint(e.message, true);
   }
@@ -1556,7 +1631,7 @@ $('btnDataRefresh').addEventListener('click', loadDataInfo);
 
 betaLoad();
 /* ---------- 初始化 ---------- */
-loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadUnderstanding(); loadWarmup(); loadChatHistory(); loadModelSettings(); loadDataInfo();
+loadStatus(); loadMemories(); loadContext(); loadHypos(); loadWeekly(); loadUnderstanding(); loadWarmup(); loadThinking(); loadChatHistory(); loadModelSettings(); loadDataInfo();
 setInterval(loadStatus, 15000);
 
 

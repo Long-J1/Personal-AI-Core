@@ -225,6 +225,7 @@ class HypothesisStore:
         *,
         detail: dict | None = None,
         max_chars: int = 300,
+        confidence: float | None = None,
     ) -> tuple[Hypothesis | None, str | None]:
         statement = (statement or "").strip()[:max_chars]
         scope = (scope or "").strip()[:SCOPE_MAX]
@@ -232,10 +233,13 @@ class HypothesisStore:
             return None, "假设内容为空"
         if not scope:
             return None, "适用范围为空"
+        # V0.5.8：后台推测要写自己的置信度（比 INIT 低）。否则库里
+        # 显示 0.50 而它自称 0.33——看起来比实际更可信。
+        conf = _clamp(INIT_CONFIDENCE if confidence is None else confidence)
         now = _now()
         hypo = Hypothesis(
             id=uuid.uuid4().hex, statement=statement,
-            confidence=INIT_CONFIDENCE, status="tentative", scope=scope,
+            confidence=conf, status="tentative", scope=scope,
             support_count=0, contradict_count=0, used_count=0,
             created_at=now, updated_at=now,
         )
@@ -246,13 +250,13 @@ class HypothesisStore:
                     " support_count, contradict_count, used_count,"
                     " created_at_iso, created_at_epoch, updated_at_iso, updated_at_epoch)"
                     " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (hypo.id, statement, INIT_CONFIDENCE, "tentative", scope,
+                    (hypo.id, statement, conf, "tentative", scope,
                      0, 0, 0, now.isoformat(), now.timestamp(),
                      now.isoformat(), now.timestamp()),
                 )
-                self._log(con, "create", hypo.id, None, INIT_CONFIDENCE,
+                self._log(con, "create", hypo.id, None, conf,
                           detail or {"scope": scope})
-        log.info("假设新增 [tentative·0.50] %s", statement[:60])
+        log.info("假设新增 [tentative·%.2f] %s", conf, statement[:60])
         return hypo, None
 
     # ---------- 读取 ----------
@@ -308,8 +312,18 @@ class HypothesisStore:
         return [self._row_to_hypo(r) for r in rows]
 
     def list_for_prompt(self, limit: int = 3) -> list[Hypothesis]:
-        """进入 Prompt 的假设：tentative + confirmed，按置信度倒序。"""
-        return self.list_hypotheses(live_only=True, limit=limit)
+        """进入 Prompt 的假设：tentative + confirmed，按置信度倒序。
+
+        V0.5.8：**后台推测一律不进 prompt**。它恒为 tentative，
+        而 tentative 默认是 live 的——不挡就等于让 AI 拿自己的猜测
+        当事实去回答用户。与 quota_overflow 同样的处理。
+        """
+        out = []
+        for h in self.list_hypotheses(live_only=True, limit=limit):
+            if (h.scope or "").startswith("background:"):
+                continue
+            out.append(h)
+        return out
 
     def get_detail(self, hypo_id: str) -> dict[str, Any] | None:
         """假设 + 全部证据 + 变更日志（UI"为什么这么认为"的依据）。"""
@@ -877,6 +891,9 @@ class HypothesisStore:
             return False
         if (scope or "").startswith("quota_overflow:"):
             return False
+        # V0.5.8：后台推测是 AI 自己的猜测，不能被用户的"对"顺手确认成事实
+        if (scope or "").startswith("background:"):
+            return False
         return True
 
     def _natural_eligible_check(self, hypo_id: str) -> bool:
@@ -1014,6 +1031,100 @@ class HypothesisStore:
             return False
         log.info("假设 %s 收到%s信号（降权 %.2f，状态保留）",
                  hypo_id[:8], channel, CONTRADICT_DELTA)
+        return True
+
+    # ---------- V0.5.8 Background Reasoning ----------
+    def background_proposed(self, scope: str) -> bool:
+        """这个 scope 的后台推测是否已经提过。
+
+        用户点过"不对"之后就不该再提——`reject()` 把 status 置为
+        rejected，本查询用"存在任一非 deleted 记录"来覆盖三种情况：
+        待确认（tentative）、已认可、已否决。都在这儿挡住。
+        """
+        scope = (scope or "").strip()[:SCOPE_MAX]
+        if not scope:
+            return True
+        with closing(self._connect()) as con:
+            row = con.execute(
+                "SELECT 1 FROM hypotheses WHERE scope=? AND status!='deleted'"
+                " LIMIT 1", (scope,)).fetchone()
+        return bool(row)
+
+    def create_background_candidate(self, candidate) -> "Hypothesis | None":
+        """把一条后台推测落成 tentative 假设。
+
+        复用既有 create()，不新建表、不加字段——来源信息全部记在
+        hypothesis_log.detail 里（既有 {"rule": ...} 惯例）。
+        """
+        if self.background_proposed(candidate.scope):
+            return None
+        hypo, why = self.create(
+            candidate.reason[:300], candidate.scope,
+            detail={"rule": "background_reasoning",
+                    "type": candidate.type,
+                    "topic": candidate.topic,
+                    "confidence": round(candidate.confidence, 2),
+                    "reason": candidate.reason,
+                    "evidence": list(candidate.evidence),
+                    "detail": dict(candidate.detail)},
+            confidence=candidate.confidence,
+        )
+        if hypo is None:
+            log.info("后台推测落库跳过：%s", why)
+            return None
+        log.info("后台推测新增 [%s·%.2f] %s", candidate.type,
+                 candidate.confidence, candidate.reason[:50])
+        return hypo
+
+    def record_background_verdict(
+        self, hypo_id: str, verdict: str, user_text: str = ""
+    ) -> bool:
+        """用户对后台推测的裁决。
+
+        正确：**只补一条 support 证据**，绝不自动 confirmed——
+              用户点一下"对"，不构成系统可以拿它当事实的证据量。
+        不对：走 reject()，落 rejected，从此不再提出。
+        """
+        user_text = (user_text or "").strip()[:200]
+        if verdict not in ("correct", "wrong"):
+            return False
+        # 守卫放在分支之前：只有后台推测能被裁决。
+        # 漏在这里等于给这个端点开了一把能否决任意假设的钥匙。
+        with closing(self._connect()) as con:
+            row = con.execute(
+                "SELECT status, scope, confidence FROM hypotheses WHERE id=?",
+                (hypo_id,)).fetchone()
+        if not row or row["status"] == "deleted":
+            return False
+        if not str(row["scope"]).startswith("background:"):
+            return False
+        if verdict == "wrong":
+            return self.reject(hypo_id, user_text or "这条推测不对",
+                               channel="background")
+        now = _now()
+        with self._lock, closing(self._connect()) as con:
+            log_id = uuid.uuid4().hex
+            with con:
+                con.execute(
+                    "INSERT INTO hypothesis_log (id, epoch, iso, action,"
+                    " hypothesis_id, conf_before, conf_after, detail)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (log_id, now.timestamp(), now.isoformat(),
+                     "verify_confirm", hypo_id, row["confidence"],
+                     row["confidence"],
+                     json.dumps({"answer": user_text or "对",
+                                 "channel": "background",
+                                 "signal": "user_correct"},
+                                ensure_ascii=False)),
+                )
+        ok, err = self.add_evidence(
+            hypo_id, "support", "correction", log_id,
+            excerpt=user_text or "用户认为这条推测是对的",
+            detail={"channel": "background", "signal": "user_correct"},
+        )
+        if not ok:
+            log.warning("后台推测确认落证据失败：%s", err)
+            return False
         return True
 
     # ---------- 删除 / 恢复 ----------

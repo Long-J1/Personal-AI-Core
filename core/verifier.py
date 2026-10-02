@@ -154,6 +154,10 @@ def select_candidate(
         # V0.5.3：溢出假设不触发验证（只当未来分析材料）
         if (h.scope or "").startswith("quota_overflow:"):
             continue
+        # V0.5.8：后台推测不发起验证提问——它本来就是没确认的猜测，
+        # 拿"你最近学习时间可能在调整，对吗"去追着问是在打扰。
+        if (h.scope or "").startswith("background:"):
+            continue
         if not (CONFIRM_BAND[0] <= h.confidence < CONFIRM_BAND[1]):
             continue
         try:

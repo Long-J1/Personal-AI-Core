@@ -62,6 +62,10 @@ class PatternEngine:
                 # 溢出恒为 tentative，本来也进不了 confirmed 组）
                 if (h.scope or "").startswith("quota_overflow:"):
                     continue
+                # V0.5.8：后台推测永远不进 pattern（恒 tentative，
+                # 这里再挡一道是防御性——万一将来有代码改了状态流）
+                if (h.scope or "").startswith("background:"):
+                    continue
                 groups.setdefault(h.scope, []).append(h)
             for scope in sorted(groups):
                 members = groups[scope]
