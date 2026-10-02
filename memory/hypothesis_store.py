@@ -1072,6 +1072,20 @@ class HypothesisStore:
                 " LIMIT 1", (scope,)).fetchone()
         return bool(row)
 
+    def list_pending_background(self, limit: int = 50) -> list:
+        """待裁决的后台候选（定向查询，不扫全表）。
+
+        V0.5.10：对话裁决每回合都要问一次"有没有待裁决的候选"。
+        用 list_hypotheses(live_only=False) 拉 200 条再在 Python 里
+        过滤，实测给每个可表态的回合平白加了约 30ms。
+        """
+        with closing(self._connect()) as con:
+            rows = con.execute(
+                "SELECT * FROM hypotheses WHERE status=? AND scope LIKE"
+                " 'background:%' ORDER BY updated_at_epoch DESC LIMIT ?",
+                (PENDING, limit)).fetchall()
+        return [self._row_to_hypo(r) for r in rows]
+
     def is_duplicate_candidate(self, scope: str) -> bool:
         """语义去重：新推测跟已有的活候选说的是不是同一件事。
 
@@ -1167,12 +1181,17 @@ class HypothesisStore:
             return self.reject(hypo_id, user_text or "这条推测不对",
                                channel="background")
         now = _now()
+        # log id 必须确定性生成：同一句话连点 5 次会生成 5 条不同的
+        # log 行，add_evidence 的去重索引（candidate+polarity+source）
+        # 就抓不住，support_count 会一路涨到毕业线以上——用户点一次
+        # 的心意被当成 5 次真实证据。实测：连点 4 次 conf 0.40→0.72。
+        # 口径与自然证据一致：同一条裁决、同一天 = 同一个来源。
+        log_id = self._natural_log_id(hypo_id, verdict + "|" + user_text, now)
         with self._lock, closing(self._connect()) as con:
-            log_id = uuid.uuid4().hex
             with con:
                 con.execute(
-                    "INSERT INTO hypothesis_log (id, epoch, iso, action,"
-                    " hypothesis_id, conf_before, conf_after, detail)"
+                    "INSERT OR IGNORE INTO hypothesis_log (id, epoch, iso,"
+                    " action, hypothesis_id, conf_before, conf_after, detail)"
                     " VALUES (?,?,?,?,?,?,?,?)",
                     (log_id, now.timestamp(), now.isoformat(),
                      "verify_confirm", hypo_id, row["confidence"],
@@ -1182,20 +1201,27 @@ class HypothesisStore:
                                  "signal": "user_correct"},
                                 ensure_ascii=False)),
                 )
-                # 认可 ≠ 成熟：进 accepted，等真实用户证据。
-                # 直接给 confirmed 就等于让后台推理自我确认——
-                # 它提猜测、用户点一下、猜测变事实、进 prompt。安全链就废了。
-                con.execute(
-                    "UPDATE hypotheses SET status=?, updated_at_iso=?,"
-                    " updated_at_epoch=? WHERE id=?",
-                    (ACCEPTED, now.isoformat(), now.timestamp(), hypo_id),
-                )
+                if row["status"] == PENDING:
+                    # 认可 ≠ 成熟：进 accepted，等真实用户证据。
+                    # 直接给 confirmed 就等于让后台推理自我确认——
+                    # 它提猜测、用户点一下、猜测变事实、进 prompt。
+                    con.execute(
+                        "UPDATE hypotheses SET status=?, updated_at_iso=?,"
+                        " updated_at_epoch=? WHERE id=?",
+                        (ACCEPTED, now.isoformat(), now.timestamp(), hypo_id),
+                    )
         ok, err = self.add_evidence(
             hypo_id, "support", "correction", log_id,
             excerpt=user_text or "用户认为这条推测是对的",
             detail={"channel": "background", "signal": "user_correct"},
         )
         if not ok:
+            # "重复证据" 不是失败：同一句话连点多次，裁决早已生效。
+            # 状态也已经推进到 accepted 了，这里保持幂等成功。
+            if err == "重复证据":
+                log.info("后台候选 %s 重复裁决（幂等，不重复计证据）",
+                         hypo_id[:8])
+                return True
             log.warning("后台候选认可落证据失败：%s", err)
             return False
         log.info("后台候选 %s 被认可 → accepted（等真实证据）", hypo_id[:8])

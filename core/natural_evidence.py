@@ -191,16 +191,18 @@ def label_gram_count(scope: str) -> int:
 def match_label(scope: str) -> str:
     """拿来做话题匹配的标签。
 
-    `scope_label()` 只按**第一个**冒号切分，于是
-    `background:focus_shift:学习` 会得到 `focus_shift:学习` ——
-    规则名混进了标签，gram 全被污染，匹配门槛跟着算错
-    （实测 need 算成 2，实际只共享 1 个"学习"，于是永远匹配不上）。
+    `scope_label()` 只按**第一个**冒号切分，直接用会有两个坑：
+      - `background:focus_shift:学习` → 得到 `focus_shift:学习`，
+        规则名混进标签，gram 全被污染，门槛跟着算错；
+      - 候选裁决按这个标签匹配时，用户正常说话永远匹配不上。
 
-    所以先把已知的 `background:` 剥掉，再交给 scope_label。
+    所以先把已知的 `background:` 剥掉，再按剩余的第一个冒号切一次
+    （剥掉之后剩下的就是 `rule:topic`），最后交给 scope_label。
     """
     s = str(scope or "").strip()
     if s.startswith("background:"):
-        s = s[len("background:"):]
+        rest = s[len("background:"):]
+        return scope_label(rest.split(":", 1)[1] if ":" in rest else rest)
     return scope_label(s)
 
 

@@ -16,6 +16,8 @@ import logging
 
 from .natural_evidence import (
     MIN_RELATED_GRAMS,
+    related_gram_count,
+    required_grams,
     MIN_WEAK_RELATED_GRAMS,
     SIGNAL_CHANGE,
     SIGNAL_DENY,
@@ -70,6 +72,73 @@ def _eligible_hypotheses(hyp_store) -> list:
     return out
 
 
+# ---------- V0.5.10 soak 暴露的缺口：对话里没法认可候选 ----------
+# V0.5.9 把候选生命周期做出来了，但只暴露在 /api/background/*/verdict。
+# 用户在聊天里说"对，我最近确实已经改成早上了"——系统听见了这句话，
+# 却不会把它当成对某条候选的裁决。soak 故事第 E 阶段因此走不通。
+#
+# 这里补一条最小通道：只在**话题强相关**且信号明确时才把裁决落下去，
+# 不做任何模糊匹配（那是 pending route cross-talk 的来源）。
+PENDING = "pending"
+BACKGROUND_PREFIX = "background:"
+
+
+def resolve_pending_candidate(hyp_store, user_text: str,
+                              signal: str) -> str | None:
+    """用户对某条待裁决候选说"对 / 不对"。返回被裁决的候选 id。
+
+    只处理 status=pending 的后台候选——accepted 已经裁决过了，
+    rejected / expired 是结束态，都不该被一句话翻回去。
+    """
+    if hyp_store is None:
+        return None
+    try:
+        cands = hyp_store.list_pending_background()
+    except Exception as exc:
+        log.warning("读待裁决候选失败（跳过）：%s", exc)
+        return None
+    best, best_n = None, 0
+    for h in cands:
+        n = related_gram_count(user_text, h.scope)
+        # 门槛随标签长度缩放——写死 2 的话，"学习"这种两字标签
+        # （最多产出 1 个二连字）永远匹配不上，候选就再也裁决不了。
+        if n >= required_grams(h.scope, strict=True) and n > best_n:
+            best, best_n = h, n
+    if best is None:
+        return None
+
+    # 候选自己声明的是哪一类猜测，用户的表态要按那一类读。
+    #
+    # 踩过的坑：分类器里"变化"优先于"支持"，所以
+    # 「对，我最近已经改成早上学习了。」被判成 change。可这条消息对的
+    # 候选恰恰是 behavior_change / habit_drift——用户说的正是"确实变了"，
+    # 那是**印证**。一刀切当成否定，会把正确的猜测杀掉。
+    #
+    # focus_shift（最近主要精力在 X）不一样：用户说"我改成早上了"
+    # 与它无关，不该动。
+    try:
+        ctype = str(best.scope or "").split(":", 2)[1] if ":" in best.scope else ""
+    except Exception:
+        ctype = ""
+    if signal == "deny":
+        verdict = "wrong"
+    elif signal == "support":
+        verdict = "correct"
+    elif signal == "change" and ctype in ("behavior_change", "habit_drift"):
+        verdict = "correct"
+    else:
+        return None                       # 猜不出来就不动
+
+    try:
+        if not hyp_store.record_background_verdict(best.id, verdict, user_text):
+            return None
+    except Exception as exc:
+        log.warning("对话裁决候选失败（跳过）：%s", exc)
+        return None
+    log.info("对话裁决候选 %s → %s（相关度 %d）", best.id[:8], verdict, best_n)
+    return best.id
+
+
 def apply_natural_signal(
     ctx_store,
     hyp_store,
@@ -101,6 +170,17 @@ def apply_natural_signal(
         if _paused(ctx_store, hyp_store):
             result["reason"] = "已暂停记忆，本轮不接线"
             return result
+
+        # V0.5.10：对话里的"对 / 不对"可以裁决待定候选。
+        # 只在信号明确 + 话题强相关时才落下去。
+        try:
+            vid = resolve_pending_candidate(hyp_store, user_text or "",
+                                            sig.signal)
+            if vid:
+                result["verdict_candidate"] = vid
+                result["hypo_ids"].append(vid)
+        except Exception as exc:
+            log.warning("对话裁决候选异常（跳过）：%s", exc)
 
         exclude = set(exclude_entry_ids or ())
         hyps = _eligible_hypotheses(hyp_store)

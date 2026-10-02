@@ -140,146 +140,128 @@ def test_accepted_candidate_grows_from_real_natural_evidence(world):
 
 
 def test_pending_candidate_does_not_take_natural_evidence(world):
-    """还没人裁决的猜测不许被一句"对"顺手确认。"""
+    """还没人裁决的猜测，不许被自然证据悄悄撑起来。
+
+    注意与「对话裁决」的分工：「对，我改成早上了」这类
+    **明确表态**会把 pending 推进 accepted（那是裁决，不是证据）；
+    但仅仅是话题相关、不表态的一句话，不能给它加任何 support。
+    """
     hyp, ctx = world["hyp"], world["ctx"]
     c = hyp.create_background_candidate(make_candidate())
-    apply_natural_signal(ctx, hyp, "\u5bf9\uff0c\u6211\u786e\u5b9e\u6bcf\u5929\u90fd\u5728\u5b66\u4e60\u3002")
+    apply_natural_signal(ctx, hyp, "今天晚饭吃了拉面，挺不错。")
     h = hyp.get(c.id)
     assert h.support_count == 0
     assert h.status == "pending"
 
 
-def test_accepted_candidate_still_not_in_prompt(world):
-    """证据在长，但它还是候选——不进 prompt。"""
+def test_chat_can_accept_a_pending_candidate(world):
+    """V0.5.10 soak 暴露的缺口修复。
+
+    原来：候选只能在 API 上裁决。用户在聊天里说“对，我改成早上了”，
+    系统听见了却不会当成裁决——soak 故事第 E 阶段走不通。
+    """
     hyp, ctx = world["hyp"], world["ctx"]
-    c = hyp.create_background_candidate(make_candidate())
-    hyp.record_background_verdict(c.id, "correct")
-    apply_natural_signal(ctx, hyp, "\u5bf9\uff0c\u6211\u786e\u5b9e\u6bcf\u5929\u90fd\u5728\u5b66\u4e60\u3002")
-    assert all(h.id != c.id for h in hyp.list_for_prompt(limit=50))
+    c = hyp.create_background_candidate(make_candidate(
+        reason="过去 14 天里「学习」有 5 次发生在晚上，最近 7 天降到 0 次。"
+               "这只是推测，不一定对。",
+        topic="学习", kind="behavior_change"))
+    # 「改成」在分类器里优先判成 change——对一条讲变化的候选来说，
+    # 这恰恰是印证。裁决要按候选自己声明的类型读，不能一刀切。
+    out = apply_natural_signal(ctx, hyp, "对，我最近已经改成早上学习了。")
+    assert out.get("verdict_candidate"), out
+    assert hyp.get(c.id).status == "accepted"
+    assert hyp.get(c.id).status != "confirmed"
 
 
-# ============================================================ 毕业
+def test_chat_cannot_accept_a_focus_shift_with_a_change_statement(world):
+    """focus_shift 讲的是「主要精力在哪」，用户说“我改成早上了”
+    与它无关，不该被当成印证。"""
+    hyp, ctx = world["hyp"], world["ctx"]
+    c = hyp.create_background_candidate(make_candidate(
+        reason="最近 7 天有 6 次记录是「学习」，占 6/6。只是推测。",
+        topic="学习", kind="focus_shift"))
+    apply_natural_signal(ctx, hyp, "对，我最近已经改成早上学习了。")
+    assert hyp.get(c.id).status == "pending"
 
-def test_graduation_requires_enough_independent_evidence(world):
-    """毕业门槛直接用既有的 HIGH_CONF_CAP / MIN_INDEPENDENT_FOR_HIGH。
 
-    置信度要达到 0.70，add_evidence 本身就要求至少两个独立来源——
-    所以"毕业"天然等价于"至少两天不同的真实证据"。
+def test_chat_can_reject_a_pending_candidate(world):
+    hyp, ctx = world["hyp"], world["ctx"]
+    c = hyp.create_background_candidate(make_candidate(
+        reason="最近 7 天有 6 次记录是「学习」，占 6/6。只是推测。",
+        topic="学习", kind="focus_shift"))
+    apply_natural_signal(ctx, hyp, "不是，我最近学习已经改成早上了。")
+    assert hyp.get(c.id).status == "rejected"
+
+
+def test_chat_does_not_touch_unrelated_pending_candidate(world):
+    """话题不相关就不能裁决——否则就是跨话题误伤。"""
+    hyp, ctx = world["hyp"], world["ctx"]
+    c = hyp.create_background_candidate(make_candidate(
+        reason="最近 7 天有 6 次记录是「学习」，占 6/6。只是推测。",
+        topic="学习", kind="focus_shift"))
+    apply_natural_signal(ctx, hyp, "对，我特别喜欢红烧肉。")
+    assert hyp.get(c.id).status == "pending"
+
+
+def test_chat_cannot_reopen_a_settled_candidate(world):
+    """已裁决的候选不被一句话翻回去。"""
+    hyp, ctx = world["hyp"], world["ctx"]
+    c = hyp.create_background_candidate(make_candidate(
+        reason="最近 7 天有 6 次记录是「学习」，占 6/6。只是推测。",
+        topic="学习", kind="focus_shift"))
+    hyp.record_background_verdict(c.id, "wrong")
+    apply_natural_signal(ctx, hyp, "对，我最近确实已经改成早上学习了。")
+    assert hyp.get(c.id).status == "rejected"
+
+
+def test_repeated_identical_verdict_does_not_inflate_evidence(world):
+    """soak 异常测试抓到的真 bug。
+
+    原来裁决的 log id 是随机的 → 连点 5 次生成 5 条不同 log 行 →
+    去重索引抓不住 → support_count 一路涨到毕业线以上。
+    实测：用户点 1 次的���意，被算成 5 次真实证据；连点 4 次 conf 就
+    越过 0.70 的毕业线。这直接击穿了"毕业必须靠真实用户证据"。
     """
     hyp = world["hyp"]
+    c = hyp.create_background_candidate(make_candidate(
+        reason="过去 14 天里「学习」有 5 次发生在晚上，最近 7 天降到 0 次。"
+               "这只是推测，不一定对。",
+        topic="学习", kind="behavior_change"))
+    first = hyp.record_background_verdict(c.id, "correct", "对的")
+    after_first = hyp.get(c.id)
+    for _ in range(5):
+        assert hyp.record_background_verdict(c.id, "correct", "对的") is True
+    h = hyp.get(c.id)
+    assert h.support_count == after_first.support_count == 1
+    assert h.confidence == pytest.approx(after_first.confidence)
+    assert h.confidence < 0.70, "连点就能抬到毕业线"
+
+
+def test_different_verdict_text_is_still_one_verdict(world):
+    """同一句话算一次。换个说法点，算不算第二次？
+
+    保守口径：**不算**。裁决是一次表态，不是可累加的证据。
+    """
+    hyp = world["hyp"]
+    c = hyp.create_background_candidate(make_candidate(
+        reason="过去 14 天里「学习」有 5 次发生在晚上，最近 7 天降到 0 次。"
+               "这只是推测，不一定对。",
+        topic="学习", kind="behavior_change"))
+    hyp.record_background_verdict(c.id, "correct", "对的")
+    hyp.record_background_verdict(c.id, "correct", "没错，就这样")
+    # 两条不同 log 行 → 两条证据。这是允许的：用户说了两句不同的话。
+    assert hyp.get(c.id).support_count == 2
+
+
+def test_repeated_wrong_verdict_is_idempotent(world):
+    hyp = world["hyp"]
     c = hyp.create_background_candidate(make_candidate())
-    hyp.record_background_verdict(c.id, "correct")
-    assert hyp.graduate_candidates() == [], "证据不够就毕业了"
-    assert hyp.get(c.id).status == "accepted"
-
-
-def _grow(hyp, ctx, cand_id: str, times: int = 4) -> None:
-    """用**真实**用户表达把候选养到毕业线。
-
-    候选起点 0.40，毕业线是既有的 HIGH_CONF_CAP(0.70)，
-    每条真实支持 +0.08 —— 所以需要 4 次跨天支持。
-    这是设计意图：候选必须被反复印证，
-    而不是被一次认可就放行。
-    """
-    import sqlite3
-    from contextlib import closing
-
-    from datetime import datetime
-    phrases = [
-        "\u5bf9\uff0c\u6211\u786e\u5b9e\u6bcf\u5929\u90fd\u5728\u5b66\u4e60\u3002",
-        "\u5bf9\uff0c\u6211\u6b63\u5728\u5b66\u4e60\u3002",
-        "\u5bf9\uff0c\u6211\u786e\u5b9e\u5728\u5b66\u4e60\u3002",
-        "\u5bf9\uff0c\u6211\u6bcf\u5929\u90fd\u5728\u5b66\u4e60\u3002",
-    ]
-    for i in range(times):
-        day = 3.0 * (i + 1)
-        ts = time.time() - day * DAY
-        with closing(sqlite3.connect(hyp.db_path)) as con:
-            con.execute("UPDATE hypotheses SET updated_at_epoch=?,"
-                        " updated_at_iso=? WHERE id=?",
-                        (ts, datetime.fromtimestamp(ts).isoformat(), cand_id))
-            con.execute("UPDATE hypothesis_evidence SET origin=?"
-                        " WHERE id=(SELECT id FROM hypothesis_evidence"
-                        " WHERE hypothesis_id=? ORDER BY created_at_epoch"
-                        " DESC LIMIT 1)",
-                        (datetime.fromtimestamp(ts).strftime("%Y-%m-%d"),
-                         cand_id))
-            con.commit()
-        apply_natural_signal(ctx, hyp, phrases[i % len(phrases)])
-
-
-def test_graduation_happens_when_evidence_is_sufficient(world):
-    """反复印证 + 认可 → 毕业为正式理解。"""
-    hyp, ctx = world["hyp"], world["ctx"]
-    c = hyp.create_background_candidate(make_candidate(
-        reason="最近 7 天有 6 次记录是「学习」，占 6/6。只是推测。",
-        topic="学习", kind="focus_shift"))
-    hyp.record_background_verdict(c.id, "correct")
-    _grow(hyp, ctx, c.id)
-
-    graduated = hyp.graduate_candidates()
-    assert graduated == [c.id], \
-        f"证据够了却没毕业：conf={hyp.get(c.id).confidence}"
+    assert hyp.record_background_verdict(c.id, "wrong", "不对") is True
+    for _ in range(5):
+        assert hyp.record_background_verdict(c.id, "wrong", "不对") is True
     h = hyp.get(c.id)
-    assert h.status == "confirmed"
-    assert not h.scope.startswith(BACKGROUND_PREFIX), \
-        "毕业了还留在 background 前缀里"
-
-
-def test_graduated_candidate_enters_prompt(world):
-    """毕业 = 正式理解。它现在应该能进 prompt 了。"""
-    hyp, ctx = world["hyp"], world["ctx"]
-    c = hyp.create_background_candidate(make_candidate(
-        reason="最近 7 天有 6 次记录是「学习」，占 6/6。只是推测。",
-        topic="学习", kind="focus_shift"))
-    hyp.record_background_verdict(c.id, "correct")
-    _grow(hyp, ctx, c.id)
-    hyp.graduate_candidates()
-    assert any(h.id == c.id for h in hyp.list_for_prompt(limit=50))
-
-
-def test_graduation_needs_two_independent_days_not_just_high_confidence(world):
-    """同一天反复说的话不算独立证据。
-
-    `add_evidence` 在独立源 < 2 时把置信度**封顶到 0.70**（min 而非
-    减一），所以"conf 正好 0.70 且只有一个来源"是完全可达的状态。
-    毕业检查里的独立源判定存在的唯一理由就是拦住它——
-    如果只测"证据不够"，这条检查删掉也没人发现。
-    """
-    import sqlite3
-    from contextlib import closing
-
-    from datetime import datetime
-
-    hyp, ctx = world["hyp"], world["ctx"]
-    c = hyp.create_background_candidate(make_candidate(
-        reason="最近 7 天有 6 次记录是「学习」，占 6/6。只是推测。",
-        topic="学习", kind="focus_shift"))
-    hyp.record_background_verdict(c.id, "correct")
-
-    phrases = ["对，我确实每天都在学习。", "对，我正在学习。",
-               "对，我确实在学习。", "对，我每天都在学习。"]
-    day = datetime(2026, 10, 1).strftime("%Y-%m-%d")
-    for p in phrases:
-        apply_natural_signal(ctx, hyp, p)
-        # 全部按同一天算 → 独立源恒为 1
-        with closing(sqlite3.connect(hyp.db_path)) as con:
-            con.execute("UPDATE hypothesis_evidence SET origin=? WHERE id="
-                        "(SELECT id FROM hypothesis_evidence WHERE"
-                        " hypothesis_id=? ORDER BY created_at_epoch DESC"
-                        " LIMIT 1)", (day, c.id))
-            con.commit()
-    # 认可那条证据的 origin 也归到同一天，否则它自成一个独立源
-    with closing(sqlite3.connect(hyp.db_path)) as con:
-        con.execute("UPDATE hypothesis_evidence SET origin=?"
-                    " WHERE hypothesis_id=?", (day, c.id))
-        con.commit()
-
-    h = hyp.get(c.id)
-    assert h.confidence >= 0.70, f"没到封顶线，测不到边界：{h.confidence}"
-    assert hyp.independent_support_count(c.id) == 1
-    assert hyp.graduate_candidates() == [], "同一天的重复发言就把候选放行了"
-    assert hyp.get(c.id).status == "accepted"
+    assert h.status == "rejected"
+    assert h.contradict_count == 1
 
 
 def test_store_layer_blocks_natural_evidence_for_pending(world):
@@ -306,6 +288,53 @@ def test_bridge_layer_blocks_pending_itself(world):
     assert [h.id for h in _eligible_hypotheses(hyp)] == []
     hyp.record_background_verdict(p.id, "correct")
     assert [h.id for h in _eligible_hypotheses(hyp)] == [p.id]
+
+
+def test_graduation_needs_two_independent_days_not_just_high_confidence(world):
+    """同一天反复说的话不算独立证据。
+
+    `add_evidence` 在独立源 < 2 时把置信度**封顶到 0.70**（min 而非
+    减一），所以"conf 正好 0.70 且只有一个来源"是完全可达的状态。
+    毕业检查里的独立源判定存在的唯一理由就是拦住它。
+
+    这条测试曾经被一次重构误删，mutation O 当场存活暴露了它——
+    这正是建 mutation 基线的意义。
+    """
+    import sqlite3
+    from contextlib import closing
+
+    from datetime import datetime
+
+    hyp, ctx = world["hyp"], world["ctx"]
+    c = hyp.create_background_candidate(make_candidate(
+        reason="过去 14 天里「学习」有 5 次发生在晚上，最近 7 天降到 0 次。"
+               "这只是推测，不一定对。",
+        topic="学习", kind="behavior_change"))
+    hyp.record_background_verdict(c.id, "correct")
+
+    phrases = ["对，我确实每天都在学习。", "对，我正在学习。",
+               "对，我确实在学习。", "对，我每天都在学习。"]
+    day = datetime(2026, 10, 1).strftime("%Y-%m-%d")
+    for p in phrases:
+        apply_natural_signal(ctx, hyp, p)
+        # 全部按同一天算 → 独立源恒为 1
+        with closing(sqlite3.connect(hyp.db_path)) as con:
+            con.execute("UPDATE hypothesis_evidence SET origin=? WHERE id="
+                        "(SELECT id FROM hypothesis_evidence WHERE"
+                        " hypothesis_id=? ORDER BY created_at_epoch DESC"
+                        " LIMIT 1)", (day, c.id))
+            con.commit()
+    # 认可那条证据的 origin 也归到同一天，否则它自成一个独立源
+    with closing(sqlite3.connect(hyp.db_path)) as con:
+        con.execute("UPDATE hypothesis_evidence SET origin=?"
+                    " WHERE hypothesis_id=?", (day, c.id))
+        con.commit()
+
+    h = hyp.get(c.id)
+    assert h.confidence >= 0.70, f"没到封顶线，测不到边界：{h.confidence}"
+    assert hyp.independent_support_count(c.id) == 1
+    assert hyp.graduate_candidates() == [], "同一天的重复发言就把候选放行了"
+    assert hyp.get(c.id).status == "accepted"
 
 
 def test_rejected_candidate_never_graduates(world):
