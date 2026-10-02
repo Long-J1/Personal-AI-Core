@@ -150,7 +150,8 @@ def topic_name(scope: str) -> str:
     return _kind_topic(s)
 
 
-def _quotes_from_evidence(evidence, *, limit: int = 4) -> list[dict]:
+def _quotes_from_evidence(evidence, *, limit: int = 4,
+                          now: datetime | None = None) -> list[dict]:
     """证据 → 用户原话列表。只取真的有原话的那几条。"""
     out = []
     for e in evidence or []:
@@ -158,7 +159,7 @@ def _quotes_from_evidence(evidence, *, limit: int = 4) -> list[dict]:
         if not text:
             continue
         out.append({
-            "when": _when_of(e),
+            "when": _when_of(e, now),
             "text": text[:120],
             "kind": "support" if e.get("polarity") == "support" else "changed",
         })
@@ -167,7 +168,7 @@ def _quotes_from_evidence(evidence, *, limit: int = 4) -> list[dict]:
     return out
 
 
-def _change_note(hypo: dict) -> str:
+def _change_note(hypo: dict, now: datetime | None = None) -> str:
     """最近一次变化的人话说明。
 
     优先读**反证证据行**——用户原话就在那里（log.detail 里只有内部
@@ -175,9 +176,9 @@ def _change_note(hypo: dict) -> str:
     绝不回退到原始 detail（那会把 source_type 泄漏给用户，
     这条是被 assert_no_internal_fields 当场抓出来的）。
     """
-    quote, when = _latest_contradiction(hypo)
+    quote, when = _latest_contradiction(hypo, now)
     if quote is None:
-        quote, when = _latest_change_log(hypo)
+        quote, when = _latest_change_log(hypo, now)
     if quote and when:
         return f"你在{when}说过「{quote}」，我调整了这条理解"
     if when:
@@ -187,7 +188,7 @@ def _change_note(hypo: dict) -> str:
     return ""
 
 
-def _latest_contradiction(hypo: dict):
+def _latest_contradiction(hypo: dict, now: datetime | None = None):
     """最新一条反证：用户当时说了什么。"""
     rows = [e for e in (hypo.get("evidence") or [])
             if e.get("polarity") == "contradict"]
@@ -195,17 +196,17 @@ def _latest_contradiction(hypo: dict):
         return None, ""
     last = rows[-1]
     text = (last.get("excerpt") or "").strip()
-    when = human_date(last.get("created_at_iso"))
+    when = human_date(last.get("created_at_iso"), now)
     return (text[:80] or None), when
 
 
-def _latest_change_log(hypo: dict):
+def _latest_change_log(hypo: dict, now: datetime | None = None):
     """没有反证证据时，退到 change / reject 这类带原话的日志。"""
     for last in reversed(hypo.get("history") or []):
         if last.get("action") not in ("change", "reject"):
             continue
         quote = _excerpt_from_detail(last.get("detail"))
-        when = human_date(last.get("iso"))
+        when = human_date(last.get("iso"), now)
         if quote or when:
             return (quote or None), when
     return None, ""
@@ -237,9 +238,9 @@ def build_understanding(hypo: dict, now: datetime | None = None) -> dict:
     topic = topic_name(hypo.get("scope", ""))
     if not topic:
         return {}                              # quota_overflow：不露出
-    quotes = _quotes_from_evidence(hypo.get("evidence"))
+    quotes = _quotes_from_evidence(hypo.get("evidence"), now=now)
     state = _STATUS_MAP.get(hypo.get("status", ""), STATE_LEARNING)
-    note = _change_note(hypo)
+    note = _change_note(hypo, now)
     changed = bool(note) or state == STATE_CHANGED
     if changed and state == STATE_LEARNING:
         state = STATE_CHANGED
@@ -249,7 +250,7 @@ def build_understanding(hypo: dict, now: datetime | None = None) -> dict:
         "about": plain_statement(hypo.get("statement", "")),
         "state": state,
         "state_text": STATE_TEXT[state],
-        "formed_on": _when_of(hypo),
+        "formed_on": _when_of(hypo, now),
         "changed": changed,
         "change_note": note,
         "quotes": quotes,
@@ -257,18 +258,21 @@ def build_understanding(hypo: dict, now: datetime | None = None) -> dict:
     }
 
 
-def _when_of(obj) -> str:
+def _when_of(obj, now: datetime | None = None) -> str:
     """取"什么时候"。
 
     ContextEntry.to_public_dict() 给的是 created_at，hypothesis 给的是
     created_at_iso——两个来源字段名不一样，这里统一兜住。
+
+    `now` 必须一路传下来：**不传就落到真时钟**，于是"昨天"这类相对
+    说法会随日历漂移。测试和回放靠注入 now 拿确定性结果。
     """
     if not isinstance(obj, dict):
         return ""
     for key in ("created_at_iso", "created_at", "iso"):
         v = obj.get(key)
         if v:
-            return human_date(v)
+            return human_date(v, now)
     return ""
 
 
@@ -282,7 +286,7 @@ def build_note(entry: dict, now: datetime | None = None) -> dict:
     if not content:
         return {}
     outdated = entry.get("memory_status") == "outdated"
-    when = _when_of(entry) or human_date(None)
+    when = _when_of(entry, now) or human_date(None, now)
     # set_memory_status 记的 status_reason 里带着用户当时说的原话
     # （"用户表示自己变了：…"）。只有这个前缀才认——其他路径写的是
     # "user_correction" 这类内部标记，不是人话。

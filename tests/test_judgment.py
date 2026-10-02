@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timedelta, timezone as _dtz
 
 import pytest
 
@@ -35,6 +36,11 @@ from core.judgment import (
 
 HINT_PREF = "做这种题的时候别直接给我答案，先给我一个提示就行"
 DIRECT_PREF = "以后这类题直接告诉我答案吧"
+
+# A/B 回放用的固定时刻：比真实时钟早，且在下午——深夜容易撞跨日边界，
+# 那样"同一天的三次请求"就不再是同一天了。
+SHANGHAI = _dtz(timedelta(hours=8))
+AB_FAKE_NOW = datetime(2026, 3, 12, 15, 30, tzinfo=SHANGHAI)
 
 
 def formal_pref(text):
@@ -360,10 +366,19 @@ def test_ab_same_model_same_input_only_understanding_differs():
 
         不 clear 提示词——要比的就是三次提示词之间**除策略段以外**
         是不是完全一样。只留最后一次就比不了。
+
+        **必须注入固定时钟**：Runtime Time Context 每轮实时生成时间，
+        三次请求的时间戳会差一两秒，那本身不是缺陷，是设计。
+        但这里要证明的是"唯一变量是正式理解"，所以时间必须钉死，
+        否则变量从 1 个变成 2 个，比对就失去意义。
         """
-        conv = ConversationService(MemoryStore(db), ContextStore(db), model,
-                                   chat_store=ChatStore(db),
-                                   hypothesis_store=HypothesisStore(db))
+        from core.runtime_time import TimeProvider
+
+        conv = ConversationService(
+            MemoryStore(db), ContextStore(db), model,
+            chat_store=ChatStore(db),
+            hypothesis_store=HypothesisStore(db),
+            time_provider=TimeProvider(clock=lambda: AB_FAKE_NOW))
         mark = len(model.prompts)
         answer = conv.chat("这道题怎么做？").answer
         return answer, model.prompts[mark]

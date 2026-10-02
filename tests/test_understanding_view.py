@@ -11,6 +11,7 @@ hypothesis_id / scope 前缀）翻译成人话。所以最要紧的测试不是"
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 from fastapi.testclient import TestClient
@@ -155,7 +156,7 @@ def test_change_is_surfaced_in_plain_words():
         history=[{"action": "change", "iso": "2026-10-02T09:00:00",
                   "detail": json.dumps({"excerpt": "最近改成早上学习"},
                                        ensure_ascii=False)}],
-    ))
+    ), now=NOW)
     assert row["changed"] is True
     assert row["state"] == "changed"
     assert "最近改成早上学习" in row["change_note"]
@@ -255,20 +256,87 @@ def test_quotes_only_come_from_real_user_text():
 def test_understanding_reads_time_from_either_field_name():
     """回归：hypothesis 与 context 的时间字段名不同（created_at vs
     created_at_iso）。只认一种就会出现"形成时间空白"。"""
-    a = build_understanding(hypo(created="2026-10-01T20:00:00"))
-    b = build_understanding(hypo_alt_time(created="2026-10-01T20:00:00"))
+    a = build_understanding(hypo(created="2026-10-01T20:00:00"), now=NOW)
+    b = build_understanding(hypo_alt_time(created="2026-10-01T20:00:00"), now=NOW)
     assert a["formed_on"] == "昨天" and b["formed_on"] == "昨天"
 
 
 def test_quote_time_reads_either_field_name():
     a = build_understanding(hypo(evidence=[
         {"polarity": "support", "excerpt": "我喜欢猫",
-         "created_at_iso": "2026-10-01T20:00:00"}]))
+         "created_at_iso": "2026-10-01T20:00:00"}]), now=NOW)
     b = build_understanding(hypo_alt_time(evidence=[
         {"polarity": "support", "excerpt": "我喜欢猫",
-         "created_at": "2026-10-01T20:00:00"}]))
+         "created_at": "2026-10-01T20:00:00"}]), now=NOW)
     assert a["quotes"][0]["when"] == "昨天"
     assert b["quotes"][0]["when"] == "昨天"
+
+
+def test_relative_time_does_not_drift_with_the_calendar():
+    """钉死"昨天"这类相对说法的**确定性**。
+
+    这条曾经是定时炸弹：测试硬编码 2026-10-01 然后断言"昨天"，
+    却没把 now 注入进去，于是真时钟跨过一天（10/02 → 10/03）后
+    渲染变成"2 天前"，测试跟着日历一起飘。
+
+    同一个数据 + 同一个 now，不管系统今天几号都必须得到同一句话。
+    所以这里用两组**相隔五年**的数据，各自配"第二天"的 now——
+    两组都必须是"昨天"。如果实现偷偷用了真时钟，
+    2026 那组会在今天不是 10/02 时立刻露馅。
+    """
+    a = build_understanding(hypo(created="2026-10-01T20:00:00"),
+                            now="2026-10-02T12:00:00")
+    b = build_understanding(hypo(created="2031-07-03T20:00:00"),
+                            now="2031-07-04T08:00:00")
+    assert a["formed_on"] == "昨天", a["formed_on"]
+    assert b["formed_on"] == "昨天", \
+        "相对时间必须由注入的 now 决定，而不是系统日历"
+
+
+def test_far_past_shows_absolute_date_not_relative():
+    """超过 7 天就不说"N 天前"，改说具体日期。
+
+    "1600 天前"对用户毫无意义，"10 月 1 日"才有意义。
+    顺带钉住：这条不受注入的 now 影响。
+    """
+    row = build_understanding(hypo(created="2026-10-01T20:00:00"),
+                              now="2026-10-20T12:00:00")
+    assert row["formed_on"] == "10 月 1 日", row["formed_on"]
+
+
+def test_no_relative_time_assertion_without_injected_now():
+    """全仓库守卫：**凡是断言"今天/昨天/N 天前"的测试，
+    都必须把 now 显式注入**。
+
+    不注入就等于让断言跟着系统日历漂——写测试那天绿，
+    跨过一天就红，而代码一点没改。这类 bug 极难定位：
+    报错只说"昨天 != 2 天前"，完全看不出跟今天几号有关。
+
+    这条守卫是本文件在 2026-10-03 真实炸过一次之后加的。
+    """
+    import ast
+    import inspect
+    import re as _re
+
+    tree = ast.parse(inspect.getsource(sys.modules[__name__]))
+    relative = _re.compile(r'"(今天|昨天|前天|\d+ 天前|\d+ 天后|'
+                           r'\d+ 月 \d+ 日)"')
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        body = ast.get_source_segment(
+            inspect.getsource(sys.modules[__name__]), node) or ""
+        if not relative.search(body):
+            continue
+        # 这个测试里有没有把 now 传进去
+        injects_now = ("now=NOW" in body or "now=\"" in body
+                       or "now=FIXED" in body or "NOW)" in body)
+        if not injects_now:
+            offenders.append(f"{node.name}:L{node.lineno}")
+    assert not offenders, (
+        "这些测试断言了相对时间却没注入 now，会跟着日历飘："
+        f"{offenders}")
 
 
 def test_outdated_note_quotes_the_users_own_change_words():

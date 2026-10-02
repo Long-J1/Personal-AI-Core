@@ -87,6 +87,7 @@ SELF_PRAISE_RULE = (
 
 CHAT_SYSTEM = (
     "你是 Personal AI——只属于当前用户的个人智能层，正在和主人日常对话。\n"
+    "{time_block}"
     "规则：\n"
     "1) 使用下方“关于这个人的理解”组织回应，让它感觉到你懂他；\n"
     "2) 遇到与理解冲突的信息，以用户当下所说为准；\n"
@@ -157,6 +158,7 @@ class ConversationService:
         pattern_store: PatternStore | None = None,
         goal_store: GoalStore | None = None,
         service_state=None,
+        time_provider=None,
     ):
         from memory.chat_store import ChatStore  # 局部导入避免循环
 
@@ -188,6 +190,12 @@ class ConversationService:
         # 真实调用成功/失败写这里，/api/status 只读不联网。
         from .service_state import default_service_state
         self._svc = service_state or default_service_state()
+        # ---- Runtime Time Context ----
+        # 每轮实时读系统时钟，绝不缓存（缓存一次就一直在说错时间）。
+        # 测试注入假时钟——真时钟会让测试依赖"跑测试那一刻是几点"，
+        # 跨午夜/跨夏令时就挂，相对日期断言也会飘。
+        from .runtime_time import TimeProvider
+        self.time = time_provider or TimeProvider()
         # 话题命中复用回忆的检索级联（D003；模型只是构造需要，不参与检索）
         from .context import Recaller
 
@@ -248,6 +256,20 @@ class ConversationService:
             out.append(Understanding(text=g.title, kind="goal",
                                     status=g.status, grade="", scope="goal"))
         return out
+
+    def _time_block(self) -> str:
+        """本轮的时间块。
+
+        取不到时间就说取不到，绝不让辅助信息掀翻对话——
+        更不该让用户看见一段堆栈。
+        """
+        try:
+            from .runtime_time import build_time_block
+
+            return build_time_block(provider=self.time) + "\n"
+        except Exception as exc:
+            log.warning("读取系统时间失败（跳过时间块）：%s", exc)
+            return ""
 
     def _judge_now(self, message: str, **kw):
         """Adaptive Judgment：正式理解 + 当前这句 → 这一次怎么回应。
@@ -346,6 +368,11 @@ class ConversationService:
         )
 
         system = CHAT_SYSTEM.format(
+            # Runtime Time Context：每轮现取。放在最前面，且写明权威性——
+            # 用户、记忆、模型自己说的时间都不作数。
+            # 它是纯读系统的瞬时值，不进 entries/hyps/pats/goals，
+            # 也就不会流进后面任何一条沉淀路径。
+            time_block=self._time_block(),
             context_block=build_context_block(entries),
             directives_block="\n".join(
                 ([f"- {d}" for d in directives] + [strategy_line])
