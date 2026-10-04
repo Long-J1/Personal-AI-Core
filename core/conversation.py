@@ -752,6 +752,20 @@ class ConversationService:
                              len(bg["proposed"]))
             except Exception as exc:
                 log.warning("后台推理失败（跳过，不影响对话）：%s", exc)
+            # 跨上下文合成（Deep Understanding）
+            # 位置在后台推理之后：合成吃的是"多个场景的关系"，
+            # 而后台推理刚写完本轮事件——顺序这样排，合成看到的是
+            # **已经包含本轮**的完整经历序列。它同样只提候选、
+            # 不影响本轮任何判断。
+            try:
+                from .synthesis_bridge import run_synthesis
+
+                syn = run_synthesis(self.store, self.hyp, self.goal)
+                if syn.get("proposed"):
+                    log.info("跨上下文合成提出 %d 条高层推测",
+                             len(syn["proposed"]))
+            except Exception as exc:
+                log.warning("跨上下文合成失败（跳过，不影响对话）：%s", exc)
             # B 路径
             try:
                 if is_pattern_declaration(message):

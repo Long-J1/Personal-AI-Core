@@ -46,6 +46,17 @@ _STATUS_MAP = {
     "deleted": STATE_DROPPED,
 }
 
+# 合成规则名 → 用户看得懂的主题名（毕业后的 inferred:synthesis:{rule}:{label}）
+#
+# 刻意**不用**"性格/人格/画像"这类词。第三节的第一原则：
+# 模式不是人格。这里说的是"行为上的一个共同点"，
+# 不是"你是什么样的人"。
+_SYNTHESIS_TOPIC = {
+    "exploration_depth": "接触新东西时的投入",
+    "feedback_continuity": "有没有反馈时的坚持程度",
+    "goal_impact": "目标带来的变化",
+}
+
 # scope 前缀 → 用户看得懂的主题名
 _SCOPE_PREFIX_TEXT = {
     "activity": "最近在做的事",
@@ -138,8 +149,36 @@ def topic_name(scope: str) -> str:
     # quota_overflow：V0.5.3 的"不可验证"边界
     # background：V0.5.8 的 AI 猜测——它有自己独立的「我正在思考」，
     # 混进"我眼中的你"就是把猜测伪装成理解。这两处都不许露出。
-    if s.startswith("quota_overflow:") or s.startswith("background:"):
+    # synthesis：Deep Understanding 的高层推测，同理——它是"我正在
+    # 思考"里的一条猜想，不是「我眼中的你」里的正式理解（第十八节）。
+    #
+    # **毕业后是 `inferred:synthesis:...`**，不��上面任何一条，所以它
+    # 会正常走进下面的分支：prefix=inferred → `_kind_topic(label)`，
+    # 而 label 是 `synthesis:exploration_depth:X`——不是 kind，
+    # 所以 `_kind_topic` 认不出来会退化成通用文案。必须在这里
+    # 单独认一次，否则毕业后的高层理解在「我眼中的你」里
+    # 显示成一句没有主题的话。
+    if s.startswith("quota_overflow:") or s.startswith("background:") \
+            or s.startswith("synthesis:"):
         return ""
+    # 毕业后的合成候选是 `inferred:{rule}:{label}`——
+    # 注意 `graduate_candidates` 用 `split(":", 1)[-1]` **只脱一层前缀**，
+    # 所以 `synthesis:exploration_depth:X` 变成 `inferred:exploration_depth:X`，
+    # 而不是 `inferred:synthesis:exploration_depth:X`。
+    # 按前者写的识别会永不命中，topic_name 于是退化成通用兜底，
+    # 「我眼中的你」里高层理解显示成一句没有主题的话。
+    if s.startswith("inferred:"):
+        rest = s[len("inferred:"):]
+        rule, sep, label = rest.partition(":")
+        if sep and rule in _SYNTHESIS_TOPIC:
+            head = _SYNTHESIS_TOPIC[rule]
+            label = label.strip()
+            return f"{head} · {label}" if label and head else (label or head)
+        if sep and rule in ("synthesis",):
+            inner, _, tail = label.partition(":")
+            if inner in _SYNTHESIS_TOPIC:
+                return _SYNTHESIS_TOPIC[inner] + (
+                    f" · {tail.strip()}" if tail.strip() else "")
     if ":" in s:
         prefix, _, label = s.partition(":")
         label = label.strip()

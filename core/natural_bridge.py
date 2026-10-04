@@ -57,6 +57,10 @@ def _eligible_hypotheses(hyp_store) -> list:
 
     store 侧还有一道 _natural_eligible 兜底，这里是第二道——
     目的是不让不该碰的候选浪费话题匹配的计算。
+
+    Deep Understanding：合成候选同一套语义。accepted（用户已认可
+    的高层推测）**要**能被自然证据支持——那是第十二节故事 1 里
+    它长大的唯一入口；pending（还没人裁决）依旧挡住。
     """
     out = []
     for h in hyp_store.list_hypotheses(live_only=False,
@@ -66,6 +70,9 @@ def _eligible_hypotheses(hyp_store) -> list:
         if (h.scope or "").startswith("quota_overflow:"):
             continue
         if (h.scope or "").startswith("background:") \
+                and h.status != "accepted":
+            continue
+        if (h.scope or "").startswith("synthesis:") \
                 and h.status != "accepted":
             continue
         out.append(h)

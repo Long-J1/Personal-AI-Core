@@ -66,6 +66,11 @@ class PatternEngine:
                 # 这里再挡一道是防御性——万一将来有代码改了状态流）
                 if (h.scope or "").startswith("background:"):
                     continue
+                # Deep Understanding：合成候选同样不进 pattern——
+                # 第十七节明确不改 Pattern 晋级门槛，候选也不直接
+                # 变 Pattern。毕业（换 inferred: 前缀）之后才按既有机制走。
+                if (h.scope or "").startswith("synthesis:"):
+                    continue
                 groups.setdefault(h.scope, []).append(h)
             for scope in sorted(groups):
                 members = groups[scope]

@@ -60,7 +60,7 @@
 | tag | `v0.2.0` `v0.3.0` `v0.4.0` `v0.5.0` |
 | `core/config.py` version | `0.6.0-beta.1` |
 | `desktop/package.json` version | `0.6.0-beta.1` |
-| 测试用例 | **761 收集 / 759 常规 EXIT=0**（+2 个真模型 e2e 需云端） |
+| 测试用例 | **807 收集 / 805 常规 EXIT=0**（+2 个真模型 e2e 需云端） |
 | 数据库表 | **15 张** / 5 个 store |
 | HTTP 端点 | **59 个** |
 | 新增依赖 | 无（运行时仅 fastapi / pydantic / uvicorn / httpx / pillow + stdlib） |
@@ -141,6 +141,7 @@
 | Pattern | `memory/pattern_store.py` | 晋升后的假设 | 规律 | ✅ `patterns` | ✅ | ✅ | ✅ |
 | Goal | `memory/goal_store.py` | 用户显式声明 | 目标 | ✅ `goals` | ✅ | ✅ 仅引用标题 | ✅ |
 | Background | `core/background_reasoning.py` | 事件序列 | pending 候选 | ✅ 复用 hypotheses 表 | 后台 | ❌ **永不直接进** | ✅ 但状态受限 |
+| Synthesis | `core/synthesis.py` | **跨主题**事件序列 | pending 候选 | ✅ 复用 hypotheses 表（`synthesis:` 前缀） | 后台 | ❌ **永不直接进** | ✅ 毕业需换前缀 |
 | Judgment | `core/judgment.py` | 正式理解 + 当前消息 | 回应方式 | ❌ 不落库 | ✅ | ✅ **策略指令** | ❌ |
 | Deposit | `core/deposit.py` | 用户消息 + 回答 | new/corrections/event | ✅ | 后台 | ❌ | ✅ |
 | Memory Policy | `core/policy.py` | Event | 是否记忆 | — | ✅ | — | — |
@@ -262,6 +263,60 @@ pending ──用户认可──► accepted ──证据足够+独立源≥2─
    │                      │
    └──用户否定──► rejected  └──长期无支持──► expired
 ```
+
+### 3.3b Cross-Context Synthesis —— 跨经历找结构
+
+**是什么**：从**不同主题**的经历里找共同结构，产出比单条事实更高一层的候选。
+
+与 Background Reasoning 的分工（不是替代）：
+```
+behavior_change / habit_drift / focus_shift  →  同一件事变了
+cross_context_synthesis                      →  不同的事共享一个结构
+```
+
+**三个模式**（`core/synthesis.py`，只做这三个）：
+- **A `exploration_depth`**：接触新东西时投入深 —— 不同主题共享"投入很深"这个行为特征
+- **B `feedback_continuity`**：有反馈时投入深、长时间没反馈时转浅 —— 条件—行为关系
+- **C `goal_impact`**：定了某目标之后，后来的行为明显往那个方向靠 —— 时间因果
+
+外加一条 **decay**：已有候选覆盖的那些活动上，深投入比例掉下来了 → 提一条"原模式可能不成立"。
+**不删历史**（第十一节 / 故事 2）。
+
+**"关系"必须是真关系，不能只是共享词汇**（第六节）。三件事都提到 "AI" 不构成关系；
+必须是共同行为模式 / 反馈条件差异 / 目标→行为的时间因果之一。
+
+**证据必须跨来源**（第九节）：同一天说四遍是**一个**源，沿用既有 `_row_day` 口径（按发生日）。
+独立来源 < 2 → 不出候选。
+
+**能产生什么**：**只有 `pending` 候选**，复用 `hypotheses` 表，
+scope 前缀 `synthesis:`（与 `background:` / `quota_overflow:` 同构：存但不生效）。
+
+**不能产生什么**：
+- ❌ 不能直接进 prompt（`list_for_prompt` 显式挡 `synthesis:` 前缀）
+- ❌ 不能进 Pattern（`pattern_engine` 显式挡，**不改既有晋级门槛**）
+- ❌ 不能露出在「我眼中的你」（`topic_name` 对 `synthesis:` 返回空）
+- ❌ 不能影响 Judgment（`is_formal()` 拒绝该前缀）
+- ❌ 不能自我确认（用户点"对"只到 `accepted`）
+- ❌ 置信度封顶 **0.45 < INIT_CONFIDENCE(0.50)** —— 即便被误当普通假设也翻不出浪
+
+**措辞纪律**（第三节的第一原则）：只写"可能存在一个模式……"，禁写"你就是……/本质上……/人格"。
+三个模式都只描述行为，**不解释行为**（不给原因、不给动机）。
+
+**Level 3 的边界**（第十五节）：本版本只做到 Level 3。
+Level 4（模式之间的关系）**没有实现**，也不要从"三个模式同时存在"推断出有什么。
+
+### 3.3c 理解层级（到哪里为止）
+
+| Level | 是什么 | 在系统里对应 | 状态 |
+|---|---|---|---|
+| **1** | 用户事实 / 用户原话 | `events` / `context_entries` | ✅ |
+| **2** | 用户明确表达的稳定偏好 | `interaction` 条目（`user_direct`） | ✅ |
+| **3** | 系统从多条**独立**证据发现的模式 | `hypotheses`（`confirmed`） | ✅ 本版本到此为止 |
+| **4** | 模式之间的关系 / 更高层模型 | — | ❌ **未实现** |
+
+一句话区分 Level 3 和 Level 4：
+Level 3 是"**若干件事共享一个结构**"；Level 4 是"**若干个结构之间还有结构**"。
+后者需要先有成熟的 Level 3 可用，而它现在刚有第一个版本。
 
 ### 3.4 Judgment —— 这次怎么答
 
@@ -580,6 +635,7 @@ core 永远只持有 ModelRegistry（门面）
 | `mutation_natural.py` | 21 | 自然证据、背景生命周期、双层守卫 |
 | `mutation_judgment.py` | 17 | 三条安全闸门、否定语义、接线、context 链路 |
 | `mutation_runtime_time.py` | 11 | 时间不泄漏/不缓存/时区/相对时间确定性 |
+| `mutation_synthesis.py` | 13 | 跨 context 关系、独立性、候选保护、变化分界、双层守卫 |
 | `mutation_candidates.py` | 12 | 卡片不泄漏/不编造/不越权 |
 
 ### 为什么真实 replay 重要
@@ -828,6 +884,7 @@ V0.5.10 的 soak（95 分钟连续跑）抓到了 5 个单测看不到的真 bug
 - `tzdata` 显式声明
 - 顶栏 320px 溢出
 - 多轮 replay 自动化（目前靠手工）
+- **Level 4**：模式之间的关系 / 更高层模型（见 §3.3c）
 
 ### F. 明确决定不做
 

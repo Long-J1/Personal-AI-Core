@@ -336,10 +336,17 @@ class HypothesisStore:
         V0.5.8：**后台推测一律不进 prompt**。它恒为 tentative，
         而 tentative 默认是 live 的——不挡就等于让 AI 拿自己的猜测
         当事实去回答用户。与 quota_overflow 同样的处理。
+
+        Deep Understanding：**合成候选同样一律不进 prompt**（第十八节）。
+        它恒为 pending，而 pending 本来就不在 LIVE_STATUSES 里，所以
+        `live_only=True` 已经挡住一道；这里再显式挡一次前缀，
+        是为了让"为什么它进不了 prompt"这件事写在代码里而不是靠约定。
         """
         out = []
         for h in self.list_hypotheses(live_only=True, limit=limit):
             if (h.scope or "").startswith("background:"):
+                continue
+            if (h.scope or "").startswith("synthesis:"):
                 continue
             out.append(h)
         return out
@@ -916,6 +923,12 @@ class HypothesisStore:
         if (scope or "").startswith("background:") \
                 and status != ACCEPTED:
             return False
+        # 合成候选同构：pending 是没人裁决的猜测（不许吃自然证据）；
+        # accepted 是用户已认可的高层推测，必须放行——那是它长大的
+        # 唯一入口（第十二节故事 1 的关键一步）。
+        if (scope or "").startswith("synthesis:") \
+                and status != ACCEPTED:
+            return False
         return True
 
     def _natural_eligible_check(self, hypo_id: str) -> bool:
@@ -1072,6 +1085,22 @@ class HypothesisStore:
                 " LIMIT 1", (scope,)).fetchone()
         return bool(row)
 
+    def synthesis_proposed(self, scope: str) -> bool:
+        """这个 scope 的高层推测是否已经提过。
+
+        与 `background_proposed` 同一套语义：用户点过"不对"之后
+        不该再提。分开写而不是共用——前缀不同就该分开判断，
+        合成候选的"提过"绝不能因为后台候选存在而被挡住，反之亦然。
+        """
+        scope = (scope or "").strip()[:SCOPE_MAX]
+        if not scope:
+            return True
+        with closing(self._connect()) as con:
+            row = con.execute(
+                "SELECT 1 FROM hypotheses WHERE scope=? AND status!='deleted'"
+                " LIMIT 1", (scope,)).fetchone()
+        return bool(row)
+
     def list_pending_background(self, limit: int = 50) -> list:
         """待裁决的后台候选（定向查询，不扫全表）。
 
@@ -1154,6 +1183,149 @@ class HypothesisStore:
                            "detail": dict(candidate.detail)})
         log.info("后台候选新增 [pending·%.2f] %s", conf, candidate.reason[:50])
         return self.get(hypo_id)
+
+    # ---------- Deep Understanding：Cross-Context Synthesis ----------
+    def create_synthesis_candidate(self, candidate) -> "Hypothesis | None":
+        """把一条高层推测落成 **pending** 候选。
+
+        复用既有表结构，**不新建表、不加字段**——与
+        `create_background_candidate` 完全同构：
+
+        - scope 用 `synthesis:` 前缀，与 `background:` 一样是"存但不生效"，
+          于是既有的那 7 处安全过滤（prompt / pattern / 「我眼中的你」/
+          Judgment / 自然证据白名单…）一处都不用改。
+        - 聚合结构（哪些经历、跨几个主题、什么关系）记在
+          `hypothesis_log.detail`，沿用既有 `{"rule": ...}` 惯例。
+        - 候选**不吃自然证据**（status=pending 不在白名单里），
+          也不进 prompt、不影响 Judgment、不参与 pattern。
+        """
+        if self.synthesis_proposed(candidate.scope):
+            return None
+        if self.is_duplicate_candidate(candidate.scope):
+            return None
+        conf = _clamp(candidate.confidence)
+        hypo_id = uuid.uuid4().hex
+        now = _now()
+        with self._lock, closing(self._connect()) as con:
+            with con:
+                con.execute(
+                    "INSERT INTO hypotheses (id, statement, confidence,"
+                    " status, scope, support_count, contradict_count,"
+                    " used_count, created_at_iso, created_at_epoch,"
+                    " updated_at_iso, updated_at_epoch)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (hypo_id, candidate.statement[:300], conf, PENDING,
+                     candidate.scope[:SCOPE_MAX], 0, 0, 0,
+                     now.isoformat(), now.timestamp(),
+                     now.isoformat(), now.timestamp()),
+                )
+                # 注意：`detail` 是**摊平**写进这一行的，不是嵌套在
+                # 下一层。第一次写成 {"detail": dict(candidate.detail)}，
+                # 于是取用方按 candidate.detail 的键去读（evidence_until /
+                # activities / relation …）全都读不到——而症状是
+                # "变化检测静默不触发"，看起来像规则没实现。
+                # 摊平之后和 background 侧的 detail 惯例一致：
+                # 顶层就有 rule / type / topic。
+                self._log(con, "create", hypo_id, None, conf,
+                          {"rule": "cross_context_synthesis",
+                           "pattern": candidate.pattern,
+                           "topic": candidate.topic,
+                           "confidence": round(conf, 2),
+                           "statement": candidate.statement,
+                           "reason": candidate.reason,
+                           "members": list(candidate.members),
+                           "contexts": list(candidate.contexts),
+                           "independent_days": candidate.independent_days,
+                           **dict(candidate.detail)})
+        log.info("合成候选新增 [pending·%.2f] %s", conf,
+                 candidate.statement[:50])
+        return self.get(hypo_id)
+
+    def record_synthesis_verdict(
+        self, hypo_id: str, verdict: str, user_text: str = ""
+    ) -> bool:
+        """用户对高层推测的裁决。
+
+        语义与 `record_background_verdict` 完全一致，且**刻意保持一致**：
+
+        - 正确 → **只补一条 support 证据**，绝不自动 confirmed。
+          用户点一下"对"不构成系统可以拿它当事实的证据量。
+        - 不对 → `reject()`，落 rejected，从此不再提出。
+
+        守卫同样放在分支之前：只有 `synthesis:` 前缀能被裁决。
+        漏在这里等于给这个端点开了一把能否决任意假设的钥匙。
+        """
+        user_text = (user_text or "").strip()[:200]
+        if verdict not in ("correct", "wrong"):
+            return False
+        with closing(self._connect()) as con:
+            row = con.execute(
+                "SELECT status, scope, confidence FROM hypotheses WHERE id=?",
+                (hypo_id,)).fetchone()
+        if not row or row["status"] == "deleted":
+            return False
+        if not str(row["scope"]).startswith("synthesis:"):
+            return False
+        if verdict == "wrong":
+            self.reject(hypo_id, reason=f"用户不认可这个模式：{user_text[:80]}"
+                           if user_text else "用户不认可这个模式")
+            return True
+        # 认可：只补证据。
+        #
+        # **status 也要推进**（pending → accepted）。这是与
+        # `record_background_verdict` 的一处刻意差异，必须写清楚：
+        # 那边点"对"之后候选停在 pending，自然证据永远进不来，
+        # 于是它只能永远停在"用户认可过的猜测"，永远长不大——
+        # V0.5.9 的 `_natural_eligible` 只放行 accepted。
+        #
+        # 为什么合成候选不学这个"安全"：
+        # `accepted` 仍然**不是 confirmed**——它依然不在 LIVE_STATUSES 里，
+        # 于是依旧不进 prompt、不进 pattern、不进「我眼中的你」、
+        # 不影响 Judgment。accepted 的唯一含义是"用户认可过了，
+        # 真实证据可以开始支持它"，而毕业还需要另外两把尺子
+        # （置信度 ≥ 0.70 且独立源 ≥ 2）。
+        # 所以推进 status 换来的只是"能长大"，不是"能生效"。
+        #
+        # 而且**不自动 confirmed**：用户点一下"对"不构成系统可以
+        # 拿它当事实的证据量——这条和 background 侧一模一样。
+        #
+        # 用确定性 id：重复表态同一句话不会让 support 凭空翻倍。
+        now = _now()
+        log_id = uuid.uuid5(uuid.NAMESPACE_URL,
+                            f"{hypo_id}|synthesis_verdict|{user_text[:60]}").hex
+        with self._lock, closing(self._connect()) as con:
+            with con:
+                exists = con.execute(
+                    "SELECT 1 FROM hypothesis_log WHERE id=?",
+                    (log_id,)).fetchone()
+                if not exists:
+                    # action 用 'verify_confirm'：_source_exists 对
+                    # correction 的特判接受的三个 action 之一。
+                    _log_write_id(con, log_id, "verify_confirm", hypo_id,
+                                  None, None,
+                                  {"channel": "synthesis_verdict",
+                                   "text": user_text[:200]})
+                if row["status"] == PENDING:
+                    con.execute(
+                        "UPDATE hypotheses SET status=?, updated_at_iso=?,"
+                        " updated_at_epoch=? WHERE id=? AND status=?",
+                        (ACCEPTED, now.isoformat(), now.timestamp(),
+                         hypo_id, PENDING))
+                    _log_write_id(con, uuid.uuid4().hex, "accept",
+                                  hypo_id, float(row["confidence"]),
+                                  float(row["confidence"]),
+                                  {"rule": "synthesis_verdict",
+                                   "from_status": PENDING,
+                                   "to_status": ACCEPTED})
+        ok, err = self.add_evidence(
+            hypo_id, "support", "correction", log_id,
+            origin=f"synthesis_verdict:{now.strftime('%Y-%m-%d')}",
+            excerpt=user_text[:120],
+            detail={"channel": "synthesis_verdict"})
+        if not ok:
+            log.warning("合成候选认可证据落链失败（跳过）：%s", err)
+            return False
+        return True
 
     def record_background_verdict(
         self, hypo_id: str, verdict: str, user_text: str = ""
@@ -1241,6 +1413,15 @@ class HypothesisStore:
         `inferred:`。换前缀是关键：`background:` 的那 7 处过滤只认
         前缀，换掉之后它自然进入 prompt / pattern /「我眼中的你」，
         而不需要在每个地方再加一条例外。
+
+        Deep Understanding 的合成候选走**同一条路径、同一把尺子**
+        （第十七节：不改 Pattern 晋级门槛、不为高层模式另立标准）。
+        它的 `synthesis:` 前缀同样只是"存但不生效"，毕业时换掉即可。
+
+        注意 `split(":", 1)[-1]` 只脱第一层前缀，所以
+        `synthesis:exploration_depth:X` 毕业成
+        `inferred:exploration_depth:X`——两层都在，正好让
+        `topic_name()` 还能认出规则名（见 understanding_view）。
         """
         out: list[str] = []
         if self.paused():
@@ -1249,6 +1430,14 @@ class HypothesisStore:
             rows = con.execute(
                 "SELECT id, scope, confidence FROM hypotheses"
                 " WHERE status=? AND scope LIKE 'background:%'",
+                (ACCEPTED,)).fetchall()
+            # 合成候选走同一条毕业路径、同一把尺子（第十七节：
+            # 不为高层模式另立标准）。前缀换成 inferred:synthesis:
+            # —— 那几处安全过滤只认 background:/quota_overflow:，
+            # 换掉前缀即自然放行，不用到处加例外。
+            rows += con.execute(
+                "SELECT id, scope, confidence FROM hypotheses"
+                " WHERE status=? AND scope LIKE 'synthesis:%'",
                 (ACCEPTED,)).fetchall()
         for r in rows:
             if float(r["confidence"]) < HIGH_CONF_CAP:
@@ -1373,11 +1562,29 @@ class HypothesisStore:
         conf_after: float | None,
         detail: dict | None,
     ) -> None:
-        now = _now()
-        con.execute(
-            "INSERT INTO hypothesis_log (id, epoch, iso, action, hypothesis_id,"
-            " conf_before, conf_after, detail) VALUES (?,?,?,?,?,?,?,?)",
-            (uuid.uuid4().hex, now.timestamp(), now.isoformat(), action,
-             hypo_id, conf_before, conf_after,
-             json.dumps(detail or {}, ensure_ascii=False)),
-        )
+        _log_write_id(con, uuid.uuid4().hex, action, hypo_id,
+                      conf_before, conf_after, detail)
+
+
+def _log_write_id(
+        con: sqlite3.Connection,
+        log_id: str,
+        action: str,
+        hypo_id: str,
+        conf_before: float | None,
+        conf_after: float | None,
+        detail: dict | None,
+    ) -> None:
+    """和 `_log` 一样，但允许指定 log id。
+
+    自然证据那条链需要**确定性 id**：同一天说同一句话两次，
+    不该让 support_count 凭空翻倍（V0.5.6 的坑）。
+    """
+    now = _now()
+    con.execute(
+        "INSERT INTO hypothesis_log (id, epoch, iso, action, hypothesis_id,"
+        " conf_before, conf_after, detail) VALUES (?,?,?,?,?,?,?,?)",
+        (log_id, now.timestamp(), now.isoformat(), action,
+         hypo_id, conf_before, conf_after,
+         json.dumps(detail or {}, ensure_ascii=False)),
+    )
