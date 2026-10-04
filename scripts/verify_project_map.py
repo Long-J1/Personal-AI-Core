@@ -31,10 +31,26 @@ def git(*a):
 
 
 CHECKS = []
+SOFT = []
 
 
 def check(name, ok, detail=""):
     CHECKS.append((name, bool(ok), detail))
+
+
+def soft(name, ok, detail=""):
+    """会自然过期的快照项。
+
+    HEAD / commit 总数 / ahead 这三项**不可能收敛**：改文档这件事本身
+    就是一次提交，提交完这三个数就变了，而它们又记在文档里。
+    也就是说一个会核对自身所在文件 HEAD 的检查器，在那个文件被改的
+    那一刻必然变红——而且无论刷新多少次，刷新本身又会推翻它。
+
+    所以它们只报告、不参与 EXIT。这些信息对读者仍有价值（写着"截至
+    commit 4e1a0e7 是 58 个"），但红着会让人以为文档在说谎，
+    而实际上文档说的是真话，只是快照过期了。
+    """
+    SOFT.append((name, bool(ok), detail))
 
 
 # ---- 1. 文档存在且不是空的 ----
@@ -46,11 +62,12 @@ check("PROJECT_SUMMARY.md 存在", len(s) > 500, f"{len(s)} 字符")
 # ---- 2. 文档声称的 git 事实 ----
 head = git("rev-parse", "--short", "HEAD")
 ncommit = git("rev-list", "--count", "HEAD")
-check("文档里的 HEAD 与实际一致", head in m, f"实际 {head}")
-check("文档里的 commit 总数正确",
-      re.search(rf"commit 总数\s*\|\s*{ncommit}\b", m) is not None, ncommit)
+soft("文档里的 HEAD 与实际一致", head in m, f"实际 {head}")
+soft("文档里的 commit 总数正确",
+     re.search(rf"commit 总数\s*\|\s*{ncommit}\b", m) is not None, ncommit)
 ahead = git("rev-list", "--count", "origin/master..HEAD")
-check("文档里的 ahead 数正确", re.search(rf"\*\*{ahead}\s*个 commit\*\*", m) is not None, ahead)
+soft("文档里的 ahead 数正确",
+     re.search(rf"\*\*{ahead}\s*个 commit\*\*", m) is not None, ahead)
 tags = sorted(git("tag", "--list").split())
 check("文档列的 tag 完整", all(t in m for t in tags), " ".join(tags))
 
@@ -104,6 +121,30 @@ check("Judgment 拒绝 quota 前缀", 'QUOTA_PREFIX = "quota_overflow:"' in jd)
 check("Judgment 只认 confirmed 假设",
       'FORMAL_HYPOTHESIS_STATUS = ("confirmed",)' in jd)
 check("Judgment 是 frozen（不写记忆）", "frozen=True" in jd)
+
+# 上面那些验的是**代码的属性**，没有一条验**文档对 Judgment 的描述**。
+# 于是把 dataclass 的 context 字段删掉，文档里那行
+# `verbosity, context, reasons, ...` 就变成一句没人拦的谎——
+# 而这正是这个工具存在的理由：文档会过期，且过期时不报错。
+# 所以这里把文档声称的输出形状和代码实际字段绑死。
+_cls = re.search(r"class Judgment:.*?def to_dict", jd, re.S)
+_code_fields = set(re.findall(r"^\s{4}(\w+):\s", _cls.group(0), re.M)) if _cls else set()
+_doc_sig = re.search(r"Judgment\((.*?)\)", m, re.S)
+_doc_body = _doc_sig.group(1) if _doc_sig else ""
+# 剥掉引号内容：response_mode="direct" | "hint_first" | "ask_first"
+# 里的三个词是**取值**不是字段名，不剥会被当成"文档多写了三个字段"。
+_doc_body = re.sub(r'"[^"]*"', "", _doc_body)
+_doc_fields = set(re.findall(r"\b(\w+)\b", _doc_body))
+_code_fields.discard("def")
+_doc_fields.discard("to_dict")
+missing_in_doc = sorted(f for f in _code_fields if f not in _doc_fields)
+check("文档写的 Judgment 输出形状与代码字段一致",
+      bool(_code_fields) and not missing_in_doc,
+      f"代码有而文档没写: {missing_in_doc or '无'}"
+      f"（代码 {sorted(_code_fields)}）")
+check("文档的 Judgment 输出形状没有多出不存在的字段",
+      not (_doc_fields - _code_fields),
+      f"文档多写: {sorted(_doc_fields - _code_fields) or '无'}")
 
 # ---- 10. Runtime Time ----
 rt = read(os.path.join(REPO, "core/runtime_time.py"))
@@ -196,9 +237,17 @@ def main():
             print(f"  [X] {name}   {detail}")
     print()
     print(f"  共 {len(CHECKS)} 项，通过 {len(CHECKS)-len(bad)}，失败 {len(bad)}")
+    if SOFT:
+        print()
+        print("  快照项（会自然过期，不参与 EXIT —— 改文档本身就是一次提交，"
+              "改完这三个数就变了）：")
+        for name, ok, detail in SOFT:
+            print(f"    {'[OK]' if ok else '[快照过期]'} {name}   {detail}")
     if bad:
+        print()
         print("  文档与代码不一致 —— 必须先改文档或改代码")
         return 1
+    print()
     print("  文档每条声称都能在代码里指到出处 [OK]")
     return 0
 
