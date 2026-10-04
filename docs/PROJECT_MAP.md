@@ -260,8 +260,17 @@ pending ──用户认可──► accepted ──证据足够+独立源≥2─
 **输出**（`core/judgment.py`，纯逻辑零 IO）：
 ```
 Judgment(response_mode="direct" | "hint_first" | "ask_first",
-         verbosity, reasons, applied, ignored)
+         verbosity, context, reasons, applied, ignored)
 ```
+- `response_mode` —— 怎么答（三种，硬上限）
+- `verbosity` —— `concise` / `normal`
+- `context` —— **他眼下在忙什么**（正式 active 目标 / 当前 task）
+- `reasons` —— **为什么这么答**（产品语言，可展示给用户）
+- `applied` / `ignored` —— 内部可追溯，**不对外**
+
+> `context` 与 `reasons` 分开是刻意的：混在一起会产生一个具体的谎——
+> reasons 里写"因为你在准备 CSP"，读起来像"我判断你要 CSP 才给提示"，
+> 而判断根本没看这个。情境不是理由。
 
 **如何利用正式理解**：`is_formal()` 是唯一闸门。
 允许的输入：
@@ -271,12 +280,16 @@ confirmed pattern
 active goal
 interaction 条目 且 source_grade ∈ ("user_direct", "user_confirmed")
 ```
+`context` 只收 `active goal`，**规律不进**（规律说"他是什么样的人"，
+那是 reasons 的地盘）。
 
 **优先级**（高 → 低）：
 ```
-① 当前用户明确指令        "还是不会，直接告诉我吧" → direct
-② 正式个人理解            已确认的 hint_first 偏好
-③ 默认 direct
+① 系统 / 安全硬约束      不在 Judgment 层——它只在上游挡。
+                        Judgment 三个取值都只能收紧，不能放开（结构上）
+② 当前用户明确指令        "还是不会，直接告诉我吧" → direct
+③ 正式个人理解            已确认的 hint_first 偏好
+④ 默认 direct
 ```
 
 **什么会覆盖长期偏好**：**当前这句用户明确说的话**。
@@ -296,8 +309,14 @@ AI 自己推测（inferred）
 转成一句执行指令进 system prompt：
 ```
 【本次回应方式】先给提示或思路，不要直接给完整答案，留出他自己想的空间。
+【他眼下在忙】长期准备 CSP 竞赛（回答可以贴着这个来，但别念出来）。
 ```
 **模型本身没变，变的是它这次被要求怎么做。**
+
+> 注意 active 目标**早就在** system prompt 里了（`=== 他的长期目标 ===` 段）。
+> `context` 不是重复注入——它把目标绑到了**这一次怎么答**上。
+> 断言 context 有效性时必须切出策略指令那一段去查，
+> 否则在加 context 之前就成立、测试会假通过。
 
 **不写记忆**：Judgment 是 `frozen=True` dataclass，无任何写入口。
 新的理解仍然只能走 `conversation → Natural Evidence → Understanding`。
@@ -546,7 +565,7 @@ core 永远只持有 ModelRegistry（门面）
 | 脚本 | 数量 | 守护什么 |
 |---|---|---|
 | `mutation_natural.py` | 21 | 自然证据、背景生命周期、双层守卫 |
-| `mutation_judgment.py` | 11 | 三条安全闸门、否定语义、接线 |
+| `mutation_judgment.py` | 17 | 三条安全闸门、否定语义、接线、context 链路 |
 | `mutation_runtime_time.py` | 11 | 时间不泄漏/不缓存/时区/相对时间确定性 |
 | `mutation_candidates.py` | 12 | 卡片不泄漏/不编造/不越权 |
 
@@ -831,7 +850,7 @@ python -m pytest tests/test_judgment.py -q   # 只看一条链，快
 
 ### 15-20 分钟：理解四层
 ```
-core/judgment.py         第四层 Judgment，357 行，纯逻辑，最好读
+core/judgment.py         第四层 Judgment，449 行，纯逻辑，最好读
 core/runtime_time.py     Runtime Context，268 行，纯逻辑
 core/understanding_view.py  产品语言投影（含泄漏自检）
 memory/hypothesis_store.py  假设 + 置信度数学 + 生命周期（1383 行，最核心）

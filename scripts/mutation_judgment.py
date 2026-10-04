@@ -7,9 +7,21 @@
 做法：人为破坏一处 → 跑 Judgment 相关测试 → **必须变红**。
 破坏之后测试还是绿的，说明那条测试是摆设，必须回去修测试。
 
-任务书点名要打的六个（A–F）都在；另加三个 G–I，
-是本次开发过程中**真的踩到过**的坑——测试没打中它们，
-是写完第一版跑出来的真 bug，不是想象出来的。
+任务书点名要打的六个（A–F）都在；另加 G–K 是开发过程中**真的踩到过**的坑，
+L–O 覆盖第九节新增的 context 这条链。P–Q 是**手工复查时才发现的两个洞**：
+
+M 先是存活了一次（双层守卫里内层从未被单独验证），
+修完又手工拆了一遍 is_formal，发现四个走 judge() 的反向测试**全部存活**
+——它们守的是外层 split_by_formal，内层闸门从它们眼里是不存在的东西。
+顺手查"目标状态闸门被放宽"这条路，发现**一个变异都没有**（P 补上，
+而 P 一上来就存活，因为参数化列表里压根没写 proposed —— 教训同
+V0.5.6 D / V0.5.8 L / V0.5.9 K：**全绿只证明你变异过的那些地方有测试。**）。
+
+四个新增变异各对应一种"看着在工作其实没工作"：
+L 字段加了但不进提示词 → 这条理解对回答影响为零；
+M 闸门只写给 mode、忘了 context → 猜测混进情境；
+N 目标标题是用户随手起的名 → 能伪造节头；
+O 覆盖分支提前 return → 情境跟着一起丢。
 
 用法：
     python scripts/mutation_judgment.py
@@ -100,6 +112,54 @@ MUTATIONS = [
      JD,
      "        if not concise and prefers_concise(u.text):",
      "        if False and not concise and prefers_concise(u.text):"),
+
+    # ---------------- L–O：第九节 context 这条链 ----------------
+    # 这四个不是想象出来的坑。写 context 时每一个都真的有可能发生：
+    # 字段加了不到提示词（L，最容易犯且最难发现）、闸门只给 mode 没给
+    # context（M）、目标标题是用户随手起的名所以能被伪节头冒充（N）、
+    # 覆盖分支提前 return 把 context 一起丢掉（O）。
+    ("L", "context 不进执行指令（目标对回答的实际影响是零）",
+     JD,
+     '    if j.context:\n'
+     '        parts.append("【他眼下在忙】" + "；".join(j.context)\n'
+     '                     + "（回答可以贴着这个来，但别念出来）。")',
+     '    if False and j.context:\n'
+     '        parts.append("【他眼下在忙】" + "；".join(j.context)\n'
+     '                     + "（回答可以贴着这个来，但别念出来）。")'),
+
+    ("M", "闸门只管 mode 不管 context（非正式目标混进情境）",
+     JD,
+     '        if u.kind != "goal" or not is_formal(u):\n'
+     '            continue',
+     '        if u.kind != "goal":\n'
+     '            continue'),
+
+    ("N", "情境标签不再清洗（目标标题能伪造出一个节头）",
+     JD,
+     "    while flat and flat[0] in _FAKE_HEADER:\n"
+     "        flat = flat[1:].lstrip()",
+     "    pass"),
+
+    ("O", "覆盖分支把情境一起抹掉（用户改主意 → 连处境也忘了）",
+     JD,
+     "    ctx = collect_context(formal, task=task)",
+     "    ctx = []"),
+
+    ("P", "放宽目标状态闸门（用户还没认可的目标混进情境）",
+     JD,
+     'FORMAL_GOAL_STATUS = ("active",)',
+     'FORMAL_GOAL_STATUS = ("active", "proposed", "paused")'),
+
+    ("Q", "背景目标伪装成普通目标（background 前缀闸门对 goal 失效）",
+     JD,
+     '    for u in understandings or []:\n'
+     '        if u.kind != "goal" or not is_formal(u):\n'
+     '            continue',
+     '    for u in understandings or []:\n'
+     '        if u.kind != "goal":\n'
+     '            continue\n'
+     '        if u.scope.startswith(BACKGROUND_PREFIX) and u.status == "confirmed":\n'
+     '            continue'),
 ]
 
 

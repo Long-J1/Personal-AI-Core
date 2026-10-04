@@ -73,9 +73,16 @@ class Understanding:
 
 @dataclass(frozen=True)
 class Judgment:
-    """这一次该怎么回应。"""
+    """这一次该怎么回应。
+    `context` 是**情境**，不是**理由**：它回答"他眼下在忙什么"，
+    而 `reasons` 回答"我为什么这么答"。两者必须分开——
+    把目标混进 reasons 会产生一个很具体的谎：用户问"这道题怎么做"，
+    reasons 写着"因为你在准备 CSP"，读起来像"我判断你要 CSP 才给提示"，
+    而真相只是我顺带知道他在忙 CSP。所以目标**不进 reasons**。
+    """
     response_mode: str = MODE_DIRECT
     verbosity: str = "normal"          # concise | normal
+    context: list[str] = field(default_factory=list)    # 当前情境（正式目标/任务）
     reasons: list[str] = field(default_factory=list)   # 产品语言，可展示给用户
     applied: list[str] = field(default_factory=list)   # 内部：哪些来源起了作用
     ignored: list[str] = field(default_factory=list)    # 内部：被挡掉的猜测来源
@@ -84,6 +91,7 @@ class Judgment:
         return {
             "response_mode": self.response_mode,
             "verbosity": self.verbosity,
+            "context": list(self.context),
             "reasons": list(self.reasons),
             "applied": list(self.applied),
             "ignored": list(self.ignored),
@@ -254,15 +262,82 @@ def prefers_concise(text: str) -> bool:
     t = _norm(text)
     return any(_norm(k) in t for k in _CONCISE)
 
+# ============================================================ 情境（context）
+#
+# 第九节要求的第三个输出：多个理解 → 一个 Judgment = mode + verbosity + context。
+#
+# 为什么单独一档而不是塞进 reasons：context 是"他眼下在忙什么"，
+# reasons 是"我为什么这么答"。塞进 reasons 会让用户误以为
+# "我给提示是因为判断你在备考"——而判断根本没看这个。
+
+MAX_CONTEXT = 3          # 超过就是噪声：模型会开始讨好地挑一个
+MAX_CONTEXT_LEN = 40     # 单条上限；目标是标题，不是正文
+
+# 目标标题里的伪节头。用户自己写 "===" 或 "##" 时如果原样进 system prompt，
+# 就能伪造出一个看起来像系统指令的段落。假设段早就栽过这个（见 conversation
+# 里 "假设陈述里的换行/伪节头不许污染 system prompt 结构"），情境段同理。
+_FAKE_HEADER = ("=", "#", "-", "*", "`", ">", "【", "[", "|")
+
+
+def clean_context_label(text: str) -> str:
+    """把一条情境压成能安全进提示词的单行短标签。"""
+    flat = " ".join(str(text or "").split())   # 换行/连续空白全部压掉
+    if not flat:
+        return ""
+    # 去掉会伪装成节头的符号；标题去掉符号后仍然是可读的
+    while flat and flat[0] in _FAKE_HEADER:
+        flat = flat[1:].lstrip()
+    if len(flat) > MAX_CONTEXT_LEN:
+        flat = flat[:MAX_CONTEXT_LEN].rstrip() + "…"
+    return flat
+
+
+def collect_context(understandings, *, task: str | None = None) -> list[str]:
+    """正式理解里与"当前情境"有关的部分。
+
+    只收 **active 的正式目标**——它们是用户自己说自己在做的事，
+    而且已经过 `is_formal()` 闸门（tentative / background / rejected /
+    expired / quota_overflow 一律进不来）。
+
+    **两道闸门，作用不同，别把第二道当生效闸门：**
+
+    1. `judge()` 里的 `split_by_formal()` —— **这道才是生效的**。
+       传进来的列表已经滤过了。
+    2. 这里面的 `is_formal(u)` —— 纵深防御。`collect_context` 是 public，
+       直接调用会绕过第 1 道（mutation M 把这道删掉、只靠第 1 道兜住，
+       测试仍全绿——那说明第 2 道从未被验证过，所以现在有测试直接打它）。
+
+    规律不进 context：规律说的是"他是什么样的人"，那是 reasons 的地盘，
+    而 context 说的是"他眼下在忙什么"。混了会变成"因为了解你所以给提示"。
+    """
+    out: list[str] = []
+    for u in understandings or []:
+        if u.kind != "goal" or not is_formal(u):
+            continue
+        label = clean_context_label(u.text)
+        if label and label not in out:
+            out.append(label)
+        if len(out) >= MAX_CONTEXT:
+            break
+    cur = clean_context_label(task or "")
+    if cur and cur not in out and len(out) < MAX_CONTEXT:
+        out.insert(0, cur)      # 当前任务比长期目标更贴近这一轮
+    return out
+
 # ============================================================ 判断
 
 def judge(message: str, understandings=None, *,
-          force_ask: bool = False) -> Judgment:
+          force_ask: bool = False,
+          task: str | None = None) -> Judgment:
     """Formal Understanding + 当前这句 → 这一次怎么回应。
 
     优先级（高到低）：
-      1. 当前用户明确指令
-      2. 安全 / 暂停（本层不处理，由调用方挡）
+      1. 系统 / 安全硬约束
+         ——**不在本层**。安全、暂停、"别记"这些是硬闸，由上游在调用本层
+         之前就挡掉；Judgment 只在 `direct/hint_first/ask_first` 里选，
+         没有任何一个输出能"打开"被关掉的东西。它只能收紧，不能放开。
+         写成注释不算数，`test_judgment_cannot_open_what_safety_closed` 盯着。
+      2. 当前用户明确指令
       3. 正式个人理解
       4. 无 → 默认 direct
     """
@@ -270,6 +345,13 @@ def judge(message: str, understandings=None, *,
     reasons: list[str] = []
     applied: list[str] = []
     ignored = [g.scope or g.kind for g in guesses]
+
+    # 情境在**任何提前返回之前**算好。
+    # 覆盖只该改"怎么答"，不该把"他眼下在忙什么"一起抹掉——
+    # 用户说"还是不会，直接告诉我吧"，CSP 这个目标照样是他的处境。
+    ctx = collect_context(formal, task=task)
+    if ctx:
+        applied.append("context")
 
     # ① 当前这一句的明确要求——最高优先级
     now_mode = current_instruction_mode(message)
@@ -279,8 +361,9 @@ def judge(message: str, understandings=None, *,
                "你这次说了先给提示" if now_mode == MODE_HINT_FIRST else
                "你这次说了先问你")
         return Judgment(response_mode=now_mode,
+                        context=ctx,
                         reasons=[why + "，所以这次照你说的来。"],
-                        applied=["current_user_instruction"],
+                        applied=["current_user_instruction"] + applied,
                         ignored=ignored)
 
     # ② 正式理解里的偏好
@@ -301,8 +384,9 @@ def judge(message: str, understandings=None, *,
 
     if preferred is None and force_ask:
         return Judgment(response_mode=MODE_ASK_FIRST,
+                        context=ctx,
                         reasons=["信息不够，我先问你一句。"],
-                        applied=["insufficient_context"],
+                        applied=["insufficient_context"] + applied,
                         verbosity="concise" if concise else "normal",
                         ignored=ignored)
 
@@ -321,6 +405,7 @@ def judge(message: str, understandings=None, *,
 
     return Judgment(response_mode=mode,
                     verbosity="concise" if concise else "normal",
+                    context=ctx,
                     reasons=reasons, applied=applied, ignored=ignored)
 
 
@@ -340,9 +425,16 @@ def strategy_directive(j: Judgment) -> str:
 
     这是"理解 → Judgment → 模型"真正生效的那一步：
     模型本身没变，变的是它这次被要求怎么做。
+
+    **context 必须在里面。** 只加一个字段而它不到提示词，
+    等于"目标参与了判断"这句话是假的——模型压根不知道他在备考 CSP，
+    那这条理解对回答的实际影响就是零。
     """
     parts = ["【本次回应方式】" + STRATEGY_TEXT.get(j.response_mode,
                                                   STRATEGY_TEXT[MODE_DIRECT])]
+    if j.context:
+        parts.append("【他眼下在忙】" + "；".join(j.context)
+                     + "（回答可以贴着这个来，但别念出来）。")
     if j.verbosity == "concise":
         parts.append("尽量简短，不要展开。")
     if j.reasons:
