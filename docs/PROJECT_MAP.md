@@ -48,12 +48,19 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `master` |
-| commit 总数 | 55 |
-| **未推送** | **43 个 commit**（`ahead origin/master`） |
+| 最后一次代码提交 | `4e1a0e7` Adaptive Judgment: Understanding → Judgment |
+| commit 总数 | 58 |
+
+> ⚠️ 上表是**手工快照**，会随每次提交变，天然差一。
+> 权威来源永远是 `git log --oneline`；`scripts/verify_project_map.py`
+> 会核对这三项（HEAD / commit 总数 / ahead），提交本文档本身就会让
+> HEAD 和 commit 总数变——这是自我指涉，改完跑一次核对器，
+> 若只报这两项，刷新快照再提交一次即可。
+| **未推送** | **46 个 commit**（`ahead origin/master`） |
 | tag | `v0.2.0` `v0.3.0` `v0.4.0` `v0.5.0` |
-| `core/config.py` version | `0.5.4` |
-| `desktop/package.json` version | `0.5.5` |
-| 测试用例 | 723 通过 / 0 失败 / 1 跳过（639 个测试函数） |
+| `core/config.py` version | `0.6.0-beta.1` |
+| `desktop/package.json` version | `0.6.0-beta.1` |
+| 测试用例 | **761 收集 / 759 常规 EXIT=0**（+2 个真模型 e2e 需云端） |
 | 数据库表 | **15 张** / 5 个 store |
 | HTTP 端点 | **59 个** |
 | 新增依赖 | 无（运行时仅 fastapi / pydantic / uvicorn / httpx / pillow + stdlib） |
@@ -63,8 +70,14 @@
 - **唯一对外发布版本：V0.5.4 Beta**（2026-09-30，官网下载 + GitHub Release `v0.2.0` 挂安装包）
 - V0.5.5 ~ 至今（UI 升级 / Judgment / Runtime Time）**全部只在本地**，未推送、未打 tag、未发布
 
-> ⚠️ **版本号不一致是已知状态**：`config.py` 写 0.5.4，`desktop/package.json` 写 0.5.5。
-> 这是 V0.5.5 之后连续开发但未做发版的结果，不是 bug，但下次发版前必须对齐。
+> ✅ **版本号已对齐**（commit `7ede61d`，2026-10-04）：`config.py` 与
+> `desktop/package.json` 都是 `0.6.0-beta.1`。此前是 0.5.4 / 0.5.5 不一致
+> ——V0.5.5 之后连续开发没做发版留下的，已在 0.6.0 预览版打包前修掉。
+> **这个 0.6.0-beta.1 仍然只在本地**：安装包已装到本机并复制了一份到桌面，
+> 没上传任何 Release，没改官网。
+> ⚠️ 这个构建**不含 Beta 体验码**（构建时未注入 `PAI_BETA_*`，
+> `models/_beta_preset.py` 没生成 → `--hidden-import` 没加 → 包里没有它）。
+> 接收方必须自己在「模型设置」配模型。
 
 ### 未提交的脏文件
 
@@ -761,7 +774,7 @@ V0.5.10 的 soak（95 分钟连续跑）抓到了 5 个单测看不到的真 bug
 
 ### 版本限制
 
-- **V0.5.4 之后全部未推送**（43 个 commit）
+- **V0.5.4 之后全部未推送**（46 个 commit）
 - `config.py` 0.5.4 vs `desktop/package.json` 0.5.5 不一致
 
 ### 视觉限制
