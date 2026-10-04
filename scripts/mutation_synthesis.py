@@ -151,6 +151,58 @@ MUTATIONS = [
      '           and (not since_epoch or (m.epoch and m.epoch > since_epoch))]',
      '    rel = [m for m in members\n'
      '           if (not since_epoch or (m.epoch and m.epoch > since_epoch))]'),
+
+    # ---------------- N–Q：第二版真踩到的坑 ----------------
+    # N 是最严重的一个：graduate_candidates 把 scope 换成 inferred:，
+    # 而参照系只认 synthesis: 前缀，于是模式一旦毕业，系统就再也看不见
+    # 它的变化——旧理解继续留在 prompt 里影响每一次回答，而系统彻底沉默。
+    ("N", "已毕业的合成理解退出变化检测参照系（旧理解不再被盯）",
+     SB,
+     '    if s.startswith("inferred:"):\n'
+     '        return s[len("inferred:"):].split(":", 1)[0] in DECAY_WATCH_RULES',
+     '    if s.startswith("inferred:"):\n'
+     '        return False'),
+
+    # O：变化候选排在新建候选后面 → 被 1 条/轮 的配额砍掉。
+    ("O", "变化候选不再优先（新建候选抢走本轮唯一配额）",
+     SB,
+     '    ordered = ([c for c in candidates if c.pattern == "decay"]\n'
+     '               + [c for c in candidates if c.pattern != "decay"])',
+     '    ordered = list(candidates)'),
+
+    # P：候选可以把自己当证据（自我证明）。
+    # 打在 `_source_exists` 的 correction 分支**内部**——第一版把注入
+    # 放在 `table = SOURCE_TABLE.get(...)` 那一行，可那个位置在
+    # correction 分支的 `return` **之后**，永远走不到，于是成了空变异：
+    # 脚本正确地把它标成 SURVIVED（脚本没坏，变异坏了）。
+    # 教训：**锚点"能匹配上"不等于变异"真的改了行为"**，必须跑一次看结果。
+    ("P", "候选自身成为合法证据来源（AI 的判断可以给自己作证）",
+     HS,
+     '            hit = con.execute(\n'
+     '                "SELECT id FROM context_entries WHERE id=?", (source_id,)\n'
+     '            ).fetchone()\n'
+     '            if hit:\n'
+     '                return True',
+     '            hit = con.execute(\n'
+     '                "SELECT id FROM hypotheses WHERE id=?", (source_id,)\n'
+     '            ).fetchone()\n'
+     '            if hit:\n'
+     '                return True\n'
+     '            hit = con.execute(\n'
+     '                "SELECT id FROM context_entries WHERE id=?", (source_id,)\n'
+     '            ).fetchone()\n'
+     '            if hit:\n'
+     '                return True'),
+
+    # Q：自然证据对 accepted 合成候选全部放行 —— 连没被裁决过的
+    # pending 也能吃到证据，候选不经用户确认就开始长大。
+    ("Q", "pending 合成候选也能吃自然证据（不需用户确认）",
+     HS,
+     '        if (scope or "").startswith("synthesis:") \\\n'
+     '                and status != ACCEPTED:\n'
+     '            return False',
+     '        if False:\n'
+     '            return False'),
 ]
 
 

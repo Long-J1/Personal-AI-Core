@@ -96,12 +96,48 @@ def _reference_of(hyp_store, hypo_id: str) -> tuple:
     return ("、".join(str(a) for a in acts), since)
 
 
+def _is_synthesis_scope(scope: str) -> bool:
+    """这条 scope 是不是来自跨上下文合成。
+
+    **两种前缀都要认**：
+      - `synthesis:{rule}:{topic}`  —— 还在候选阶段
+      - `inferred:{rule}:{topic}`   —— 已毕业成正式理解
+
+    只认前者是个真 bug：模式一旦毕业，scope 就换成 `inferred:`，
+    于是变化检测**再也看不见它**——用户后来完全不再那样了，
+    系统却因为"那条记录不在我的参照系里"而彻底沉默。
+    症状是"故事 B 什么都没发生"，而且不报错。
+    """
+    s = str(scope or "")
+    if is_synthesis(s):
+        return True
+    if s.startswith("inferred:"):
+        return s[len("inferred:"):].split(":", 1)[0] in DECAY_WATCH_RULES
+    return False
+
+
+def _synthesis_rule_of(scope: str) -> str:
+    """取出规则名（exploration_depth / feedback_continuity / ...）。"""
+    s = str(scope or "")
+    if is_synthesis(s):
+        parts = s.split(":", 2)
+    elif s.startswith("inferred:"):
+        parts = s[len("inferred:"):].split(":", 1)
+        parts = ["inferred"] + parts
+    else:
+        return ""
+    return parts[1] if len(parts) >= 2 else ""
+
+
 def _existing_synthesis_topics(hyp_store) -> dict:
-    """已有候选的 scope → (活动名, 形成时刻)。变化检测的参照系。
+    """已有合成理解 → (活动名, 分界时刻)。变化检测的参照系。
+
+    **包含已毕业的正式理解**（`_is_synthesis_scope` 两种前缀都认）。
+    这是故事 B 能成立的前提：真正的风险不在"候选还悬着"的时候，
+    而在"系统已经把这条当正式理解、而用户早已不是这样了"的时候。
 
     两个键都要：只有活动名而没有形成时刻，检测会把**当初支撑旧模式的
-    那批深投入记录**一起算进分母，比例永远降不下来——故事 2 明明发生了
-    却检测不到。时刻让"后来变浅了"有明确的分母。
+    那批深投入记录**一起算进分母，比例永远降不下来。
 
     rejected / deleted / expired 一律跳过：用户已经否决过的模式，
     不该再被拿来说"它变了"——那等于绕过他的一次明确否定。
@@ -109,15 +145,11 @@ def _existing_synthesis_topics(hyp_store) -> dict:
     out: dict[str, tuple] = {}
     try:
         for h in hyp_store.list_hypotheses(live_only=False, limit=200):
-            if not is_synthesis(h.scope):
+            if not _is_synthesis_scope(h.scope):
                 continue
             if h.status in ("rejected", "deleted", "expired"):
                 continue
-            parts = h.scope.split(":", 2)
-            if len(parts) < 3:
-                continue
-            rule = parts[1]
-            if rule not in DECAY_WATCH_RULES:
+            if _synthesis_rule_of(h.scope) not in DECAY_WATCH_RULES:
                 continue
             ref = _reference_of(hyp_store, h.id)
             if ref:
@@ -164,7 +196,19 @@ def run_synthesis(memory_store, hyp_store, goal_store=None, *,
         log.warning("跨上下文合成读数据失败（跳过）：%s", exc)
         return result
 
-    for c in candidates:
+    # **变化候选优先**。
+    #
+    # 一轮只摆 max_proposals 条（摆多了像算命），而 synthesize() 产出的
+    # 顺序是"新建在前、变化在后"。于是只要某条新建候选先抢到配额，
+    # decay 就永远被砍掉——故事 B 的症状是：旧模式已毕业成正式理解、
+    # 用户后来完全不是那样了，系统却一条变化都不提。
+    #
+    # 而且 decay **确实更紧急**：它针对的是一条**已经在影响回答**的
+    # 正式理解（graduation 换前缀后已进入 prompt），而新建候选只是
+    # 一个还没人看过的猜想。拿紧急的去给不紧急的让路是错的。
+    ordered = ([c for c in candidates if c.pattern == "decay"]
+               + [c for c in candidates if c.pattern != "decay"])
+    for c in ordered:
         if len(result["proposed"]) >= max_proposals:
             break
         try:

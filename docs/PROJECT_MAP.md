@@ -60,7 +60,7 @@
 | tag | `v0.2.0` `v0.3.0` `v0.4.0` `v0.5.0` |
 | `core/config.py` version | `0.6.0-beta.1` |
 | `desktop/package.json` version | `0.6.0-beta.1` |
-| 测试用例 | **807 收集 / 805 常规 EXIT=0**（+2 个真模型 e2e 需云端） |
+| 测试用例 | **815 收集 / 813 常规 EXIT=0**（+2 个真模型 e2e 需云端） |
 | 数据库表 | **15 张** / 5 个 store |
 | HTTP 端点 | **59 个** |
 | 新增依赖 | 无（运行时仅 fastapi / pydantic / uvicorn / httpx / pillow + stdlib） |
@@ -284,6 +284,24 @@ cross_context_synthesis                      →  不同的事共享一个结构
 
 **"关系"必须是真关系，不能只是共享词汇**（第六节）。三件事都提到 "AI" 不构成关系；
 必须是共同行为模式 / 反馈条件差异 / 目标→行为的时间因果之一。
+同理，"晚上跑步" + "晚上学习" 也不构成"夜间活动"——共同的时间副词不是行为结构。
+
+**变化检测盯住的是"已毕业"的正式理解**（Story B）。这一点容易漏：
+`graduate_candidates()` 会把 scope 从 `synthesis:{rule}:{topic}` 换成
+`inferred:{rule}:{topic}`，如果参照系只认 `synthesis:` 前缀，模式一旦毕业
+系统就**再也看不见它的变化**——而真正的风险恰恰在毕业之后
+（那条理解已经进了 prompt，正在影响每一次回答）。
+所以 `_is_synthesis_scope()` 两种前缀都认。
+
+**变化候选优先于新建候选**：一轮只摆 1 条（摆多了像算命），
+而 decay 针对的是**已生效**的理解，新建候选只是没人看过的猜想。
+
+**绝对禁止自我证明**（第十一节）。三道独立机制：
+- `SOURCE_TYPES = ("context","event","correction")` —— `hypothesis` 不在白名单里，
+  `add_evidence` 最前面就拒（注释原话："假设不能证明自己"）
+- `_source_exists` 要求追溯到 context_entries / events / hypothesis_log 的**真实行**
+- 裁决那条证据的 origin 是 `synthesis_verdict:`、excerpt 是**用户原话**，
+  不是 candidate.statement（那句是 AI 自己写的）
 
 **证据必须跨来源**（第九节）：同一天说四遍是**一个**源，沿用既有 `_row_day` 口径（按发生日）。
 独立来源 < 2 → 不出候选。
@@ -635,7 +653,7 @@ core 永远只持有 ModelRegistry（门面）
 | `mutation_natural.py` | 21 | 自然证据、背景生命周期、双层守卫 |
 | `mutation_judgment.py` | 17 | 三条安全闸门、否定语义、接线、context 链路 |
 | `mutation_runtime_time.py` | 11 | 时间不泄漏/不缓存/时区/相对时间确定性 |
-| `mutation_synthesis.py` | 13 | 跨 context 关系、独立性、候选保护、变化分界、双层守卫 |
+| `mutation_synthesis.py` | 17 | 跨 context 关系、独立性、候选保护、变化分界、双层守卫、自我证明 |
 | `mutation_candidates.py` | 12 | 卡片不泄漏/不编造/不越权 |
 
 ### 为什么真实 replay 重要

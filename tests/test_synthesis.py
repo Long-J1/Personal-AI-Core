@@ -90,11 +90,41 @@ def test_single_context_makes_no_high_level_pattern():
     assert synthesize([]) == []
 
 
-def test_sharing_a_word_is_not_a_relationship():
+def test_same_time_of_day_is_not_a_shared_structure():
+    """第十五节的 False Positive：两个场景只共享"晚上"不得合并。
+
+    "晚上跑步" + "晚上学习" → 不能推出"用户喜欢夜间活动"。
+    关键词高度重合，但那只是同一个时间副词，不构成行为结构。
+
+    刻意再加一条更难骗的对照：两件事**都投入很深**，唯一共同点仍然
+    只有"晚上"。如果实现是靠"投入深"抓的，它会出候选——那就要看它
+    抓的到底是"晚上"还是"投入深"。这里期望**不出**：
+    两个主题 + 两天虽然过了最低门槛，但 Pattern A 额外要求
+    "接触新东西"的场景（NOVELTY_MARKERS），跑步/学习都不满足。
+    """
+    plain = [M("n1", "跑步", "晚上跑步半小时", 3),
+             M("n2", "学习", "晚上学习两小时", 2)]
+    assert synthesize(plain) == []
+
+    both_deep = [M("n1", "跑步", "晚上跑步一整天", 3),
+                 M("n2", "学习", "晚上学习连着好几天", 2)]
+    assert synthesize(both_deep) == [], \
+        "只共享『晚上』不该形成模式——要么它抓错了特征，要么门槛太松"
+
+    # 对照：三个不同主题、都有新东西场景、都深投入 → 应当成立
+    real = [M("p1", "AI", "晚上研究新技术一整天", 3),
+            M("p2", "编程", "晚上学新语言连着好几天", 2),
+            M("p3", "项目", "晚上做新项目一整个下午", 1)]
+    out = synthesize(real)
+    assert [c.pattern for c in out] == ["A"]
+    assert set(out[0].contexts) == {"AI", "编程", "项目"}
+
+
+def test_one_statement_does_not_become_a_high_level_pattern():
     """三件事都只提到 AI——那不是关系，是词频。
 
-    第六节明说"不得仅因共享一个词就合并"。这三条在
-    "投入深"上没有共同点，只是都出现了 AI。
+    规格第六节 + 第十四节：关键词高度相关也不行。
+    这三条在"投入深"上没有共同点，只是都出现了 AI。
     """
     vocab = [M("v1", "AI", "看了个 AI 视频", 3),
              M("v2", "AI", "AI 挺有意思", 2),
@@ -205,6 +235,96 @@ def test_independent_days_counts_days_not_events():
     ms = [M("a", "AI", "一整天", 3), M("b", "AI", "一整天", 3),
           M("c", "编程", "连着好几天", 1), M("d", "项目", "一整个下午", 1)]
     assert independent_days(ms) == 2
+
+
+def test_decay_detected_after_pattern_graduated():
+    """Story B 的核心：旧模式**已经毕业成正式理解**之后，变化仍要被发现。
+
+    这是本次开发真踩到的第三个坑，而且是三个里最严重的：
+
+    `graduate_candidates()` 把 scope 从 `synthesis:{rule}:{topic}` 换成
+    `inferred:{rule}:{topic}`。而变化检测的参照系只认 `synthesis:` 前缀，
+    于是模式一旦毕业，系统就**再也看不见它**——用户早已不是那样了，
+    系统却彻底沉默。不报错、不产出、看起来像"没有变化"。
+
+    而真正的风险恰恰在毕业之后：这条理解已经进了 prompt，
+    正在影响每一次回答，"它已经不成立了"是最该被说出来的事。
+    """
+    _, store, hyp, ctx = _fresh()
+    old = _propose_one(store, hyp)
+    hyp.record_synthesis_verdict(old.id, "correct", "确实是这样")
+    for t in ("学新东西时我总是钻进去好几天", "研究新技术一投入就很深",
+              "换新东西也总是钻进去"):
+        hyp.record_natural_evidence(old.id, t, "support")
+    assert hyp.graduate_candidates()
+    grad = hyp.get(old.id)
+    assert grad.status == "confirmed"
+    assert grad.scope.startswith("inferred:")
+    # 已毕业 → 已在影响回答
+    assert old.id in [x.id for x in hyp.list_for_prompt()]
+
+    _seed(store, [("AI", "随便看了几个视频，没深入", 6),
+                  ("编程", "扫了一眼教程", 5),
+                  ("项目", "试了试就放下了", 4),
+                  ("AI", "划水刷了一下，没细看", 3),
+                  ("项目", "又开了个坑，随便看看", 2)])
+    from core.synthesis_bridge import run_synthesis
+    r = run_synthesis(store, hyp)
+    assert [p["pattern"] for p in r["proposed"]] == ["decay"], r
+    # 旧理解仍然保留（不删历史），但变化已经摆到用户面前
+    assert hyp.get(old.id).status == "confirmed"
+    assert hyp.get(old.id).scope == grad.scope
+    decay = [h for h in hyp.list_hypotheses(live_only=False)
+             if "pattern_decay" in h.scope][0]
+    assert decay.status == "pending"
+    assert "可能" in decay.statement
+
+
+def test_decay_wins_the_proposal_quota():
+    """变化候选必须排在新建候选前面。
+
+    一轮只摆 1 条（摆多了像算命），而 synthesize() 的产出顺序是
+    "新建在前、变化在后"。于是只要有一条新建候选先抢到配额，
+    decay 就永远被砍掉——而且 decay 更紧急：它针对的是**已经进了
+    prompt、正在影响回答**的正式理解，新建候选只是没人看过的猜想。
+    """
+    _, store, hyp, _ = _fresh()
+    old = _propose_one(store, hyp)
+    hyp.record_synthesis_verdict(old.id, "correct", "确实是这样")
+    for t in ("学新东西时我总是钻进去好几天", "研究新技术一投入就很深",
+              "换新东西也总是钻进去"):
+        hyp.record_natural_evidence(old.id, t, "support")
+    hyp.graduate_candidates()
+    # 这些深投入记录保证"新建候选 A"这一轮也会被判定成立
+    _seed(store, [("AI", "随便看了几个视频，没深入", 6),
+                  ("编程", "扫了一眼教程", 5),
+                  ("项目", "试了试就放下了", 4),
+                  ("AI", "划水刷了一下，没细看", 3)])
+    from core.synthesis_bridge import MAX_PROPOSALS_PER_RUN, run_synthesis
+    assert MAX_PROPOSALS_PER_RUN == 1
+    r = run_synthesis(store, hyp)
+    assert len(r["proposed"]) == 1
+    assert r["proposed"][0]["pattern"] == "decay", r
+
+
+def test_graduated_synthesis_is_still_a_decay_reference():
+    """已毕业的合成理解必须仍在参照系里（`_is_synthesis_scope` 双前缀）。"""
+    from core.synthesis_bridge import (_is_synthesis_scope,
+                                       _synthesis_rule_of)
+    _, store, hyp, _ = _fresh()
+    old = _propose_one(store, hyp)
+    hyp.record_synthesis_verdict(old.id, "correct", "确实是这样")
+    for t in ("a", "b", "c"):
+        hyp.record_natural_evidence(old.id, t, "support")
+    hyp.graduate_candidates()
+    s = hyp.get(old.id).scope
+    assert s.startswith("inferred:")
+    assert _is_synthesis_scope(s) is True
+    assert _synthesis_rule_of(s) == "exploration_depth"
+    # 非合成来源不许被误认
+    assert _is_synthesis_scope("inferred:dynamic") is False
+    assert _is_synthesis_scope("activity:学习") is False
+    assert _is_synthesis_scope("background:focus_shift:学习") is False
 
 
 # ============================================================ 3 候选，不是事实
@@ -438,11 +558,51 @@ def test_candidate_never_enters_my_view_of_you():
     assert topic_name(hyp.get(h.id).scope) == ""
 
 
+def test_source_type_whitelist_has_no_hypothesis_type():
+    """第十一节的**外层**铁律：证据来源白名单里不许有 hypothesis。
+
+    `SOURCE_TYPES = ("context","event","correction")`——`add_evidence`
+    在最前面就按它拒绝 `'hypothesis'`，注释原话就是
+    "假设不能证明自己"。这条断言钉的是这个常量本身，
+    防止将来有人为了"支持自己"把它加进去。
+    """
+    from memory.hypothesis_store import SOURCE_TYPES
+    assert "hypothesis" not in SOURCE_TYPES
+    assert "synthesis" not in SOURCE_TYPES
+    assert SOURCE_TYPES == ("context", "event", "correction")
+
+
 def test_pending_candidate_cannot_take_natural_evidence():
-    """pending 不吃自然证据——没人裁决过的猜测不许长大。"""
+    """pending 不吃自然证据——没人裁决过的猜测不许长大。
+
+    两层都要验：`record_natural_evidence` 走**外层**状态检查，
+    而 `add_evidence` 侧还有 `_natural_eligible` 那道白名单。
+    只测外层的话，改内层白名单这条测试照样全绿（mutation Q 存活过一次）。
+    """
     _, store, hyp, ctx = _fresh()
     h = _propose_one(store, hyp)
-    assert hyp.record_natural_evidence(h.id, "我最近确实一直在学新东西", "support") is False
+
+    # 外层
+    assert hyp.record_natural_evidence(h.id, "我最近确实一直在学新东西",
+                                       "support") is False
+    # 内层白名单（直接问它，不经 record_natural_evidence）。
+    # ⚠️ `_natural_eligible` 有两个重载：一个吃 (status, scope)，
+    # 一个吃 (hypo_id)。只吃 id 那个叫 `_natural_eligible_check`。
+    # 写错名字报的是 "missing 1 required positional argument"，
+    # 完全指不到"两层守卫"。
+    assert hyp._natural_eligible("pending", h.scope) is False
+    assert hyp._natural_eligible("accepted", h.scope) is True
+    assert hyp._natural_eligible_check(h.id) is False
+
+    # ⚠️ 上面那行断言 `_natural_eligible("pending", ...)` 测的**不是**
+    # synthesis 白名单——它被更前面那条 `status not in (...)` 拦住了。
+    # 所以白名单本身要单独打：用 tentative（一个合法 live 状态）
+    # 配 synthesis: 前缀，这样只有 synthesis 白名单能拦它。
+    # 这是本项目第六次撞上双层守卫。
+    assert hyp._natural_eligible("tentative", h.scope) is False, \
+        "synthesis: 前缀在 tentative 下也必须被挡（自然证据白名单）"
+    assert hyp._natural_eligible("tentative", "interaction:提示") is True, \
+        "对照组：普通 interaction 不受这条白名单影响（否则上条是全拒）"
     assert hyp.get(h.id).status == "pending"
 
 
@@ -622,7 +782,95 @@ def test_decay_reference_survives_verdict_and_evidence():
     assert since > 0
 
 
-# ============================================================ 6 毕业
+# ============================================================ 6 自我证明禁令
+
+def test_synthesis_cannot_evidence_itself():
+    """第十一节：**绝对禁止自我证明**。
+
+    "我发现用户探索欲很强" → 因为是我的判断 → 又拿它当证据，这条链
+    一旦成立，AI 就能把自己的猜测吹成正式理解。
+
+    机制上已经成立：`_source_exists` 要求证据能追溯到
+    context_entries / events / hypothesis_log 里的**真实行**，
+    而候选自己只是 hypotheses 表里的一行，查不到任何表 ⇒ 绑定被拒。
+
+    这条测试钉死的是"别去改 `_source_exists` 让候选自己能当证据"。
+    """
+    _, store, hyp, _ = _fresh()
+    h = _propose_one(store, hyp)
+    # 候选刚建立时**零证据**——它凭什么支持自己？
+    with sqlite3.connect(store.db_path) as con:
+        n = con.execute("SELECT COUNT(*) FROM hypothesis_evidence"
+                        " WHERE hypothesis_id=?", (h.id,)).fetchone()[0]
+    assert n == 0, "候选建立时就带着证据 —— 自我证明"
+
+    # 裁决之后唯一的证据必须指向一条真实的 log 行（用户的表态）
+    hyp.record_synthesis_verdict(h.id, "correct", "确实是这样")
+    with sqlite3.connect(store.db_path) as con:
+        rows = con.execute(
+            "SELECT source_type, source_id FROM hypothesis_evidence"
+            " WHERE hypothesis_id=? AND polarity='support'",
+            (h.id,)).fetchall()
+        assert rows, "裁决后应当有一条来自用户表态的证据"
+        for stype, sid in rows:
+            assert stype == "correction"
+            hit = con.execute(
+                "SELECT 1 FROM hypothesis_log WHERE id=? AND action IN"
+                " ('reject','verify_confirm','change')", (sid,)).fetchone()
+            assert hit, f"证据 {sid} 追溯不到真实的用户行为记录"
+
+    # 候选自身（hypotheses 行）永远不能当 source_id。
+    #
+    # 这里有**两道**独立的守卫，必须分开验（否则改掉任何一道都测不出）：
+    #
+    # ① 白名单铁律：`source_type not in SOURCE_TYPES`（`'hypothesis'`
+    #    根本不在里面），在 `_source_exists` **之前**就返回。
+    #    这条注释写着"假设不能证明自己"——第十一节其实早就实现了。
+    # ② 追溯校验 `_source_exists`：SOURCE_TYPES 里的三种都必须能
+    #    追溯到真实行；候选自己不是任何一张表里的行 ⇒ 拒绝。
+    #
+    # 第一版我只写了"candidate id 当 source_id"一句，被 ① 遮住，
+    # 于是改动 ② 时 mutation P 存活（本项目第六次双层守卫）。
+    # 两条都必须直接打。① 靠一个**不在白名单里**的 source_type：
+    # add_evidence 对它 `return False, "不允许的证据来源…"`，
+    # 是 (False, 原因) 不是异常——写成 pytest.raises 会报
+    # "DID NOT RAISE"，报错完全指不到"返回 False 才是契约"。
+    ok, why = hyp.add_evidence(h.id, "support", "hypothesis", h.id)
+    assert ok is False
+    assert "不允许的证据来源" in why, why
+    from memory.hypothesis_store import SOURCE_TYPES
+    assert "hypothesis" not in SOURCE_TYPES
+    # ② 在白名单里、但追溯不到行
+    for stype in ("correction", "event", "context"):
+        ok, _why = hyp.add_evidence(h.id, "support", stype, h.id)
+        assert ok is False, f"{stype} 路径把候选自己当成合法证据源了"
+
+
+def test_verdict_evidence_is_user_statement_not_ai_judgement():
+    """裁决那条证据必须指向"用户表态"，不是"AI 的判断"。
+
+    容易搞混：`record_synthesis_verdict` 是**系统**在记，
+    但它记的是**用户说了什么**。所以 excerpt 必须是用户原话，
+    不能是 candidate.statement（那句是 AI 自己写的）。
+    """
+    _, store, hyp, _ = _fresh()
+    h = _propose_one(store, hyp)
+    said = "对，我确实一碰到新东西就钻进去"
+    hyp.record_synthesis_verdict(h.id, "correct", said)
+    # sqlite3.connect() 默认返回 tuple 行，不是按列名索引的 Row——
+    # 用 row["origin"] 会报 "tuple indices must be integers"，
+    # 报错完全不指向"行工厂没配"。
+    with sqlite3.connect(store.db_path) as con:
+        con.row_factory = sqlite3.Row
+        row = con.execute(
+            "SELECT origin, excerpt FROM hypothesis_evidence"
+            " WHERE hypothesis_id=? LIMIT 1", (h.id,)).fetchone()
+    assert row["origin"].startswith("synthesis_verdict:"), row["origin"]
+    assert row["excerpt"] == said
+    assert h.statement not in row["excerpt"]
+
+
+# ============================================================ 7 毕业
 
 def test_graduation_uses_existing_thresholds_and_scope_swap():
     """故事 1 完整链：候选 → 认可 → 真实证据 → 正式理解。
@@ -669,6 +917,45 @@ def test_graduation_refuses_without_enough_independent_sources():
     hyp.record_natural_evidence(h.id, "还是这样", "support")   # 同一天
     assert hyp.graduate_candidates() == []
     assert hyp.get(h.id).status == "accepted"
+
+
+def test_lifecycle_survives_restart():
+    """第21.16条：重启后生命周期保持。
+
+    模拟进程重启 = **全新的 store 实例**，没有任何内存态。
+    候选的 status / 置信度 / 独立源 / 是否可毕业必须全部照旧。
+
+    这条容易被自己骗过去：测试里如果复用同一个 hyp 对象，
+    它带着连接和缓存，看起来"重启了也正常"。
+    """
+    from core.synthesis_bridge import list_synthesis_candidates
+
+    db, store, hyp, ctx = _fresh()
+    h = _propose_one(store, hyp)
+    hyp.record_synthesis_verdict(h.id, "correct", "确实是这样")
+    hyp.record_natural_evidence(h.id, "学新东西时我总是钻进去好几天", "support")
+    before = hyp.get(h.id)
+    snap = (before.status, round(before.confidence, 2),
+            hyp.independent_support_count(h.id))
+
+    # ---- 重启：全新实例，只靠库里的数据 ----
+    from memory.hypothesis_store import HypothesisStore
+    hyp2 = HypothesisStore(db)
+    after = hyp2.get(h.id)
+    assert (after.status, round(after.confidence, 2),
+            hyp2.independent_support_count(h.id)) == snap
+    # 「我正在思考」仍列得出它
+    assert h.id in [x.id for x in list_synthesis_candidates(hyp2)]
+    # 但它依然不进 prompt
+    assert h.id not in [x.id for x in hyp2.list_for_prompt()]
+
+    # 重启后仍能继续长大并毕业
+    for t in ("研究新技术一投入就很深", "换新东西也总是钻进去"):
+        hyp2.record_natural_evidence(h.id, t, "support")
+    assert hyp2.graduate_candidates()
+    grad = hyp2.get(h.id)
+    assert grad.status == "confirmed"
+    assert h.id in [x.id for x in hyp2.list_for_prompt()]
 
 
 def test_repeating_the_same_sentence_does_not_inflate_confidence():
