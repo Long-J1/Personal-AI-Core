@@ -75,9 +75,9 @@ MUTATIONS = [
 
     ("F", "取消变化识别（用户改主意也不标记）",
      UV,
-     "    quote, when = _latest_contradiction(hypo)\n"
+     "    quote, when = _latest_contradiction(hypo, now)\n"
      "    if quote is None:\n"
-     "        quote, when = _latest_change_log(hypo)",
+     "        quote, when = _latest_change_log(hypo, now)",
      "    quote, when = None, \"\""),
 
     ("G", "无原话也照样展示（凭空造来源）",
@@ -89,7 +89,8 @@ MUTATIONS = [
 
     ("H", "\u8ba9 quota_overflow / background \u9732\u7ed9\u7528\u6237\uff08\u8d8a\u6743\u5c55\u793a\uff09",
      UV,
-     "    if s.startswith(\"quota_overflow:\") or s.startswith(\"background:\"):\n"
+     "    if s.startswith(\"quota_overflow:\") or s.startswith(\"background:\") \\\n"
+     "            or s.startswith(\"synthesis:\"):\n"
      "        return \"\"",
      "    if False:\n        return \"\""),
 
