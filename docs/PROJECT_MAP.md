@@ -60,9 +60,9 @@
 | tag | `v0.2.0` `v0.3.0` `v0.4.0` `v0.5.0` |
 | `core/config.py` version | `0.6.0-beta.1` |
 | `desktop/package.json` version | `0.6.0-beta.1` |
-| 测试用例 | **815 收集 / 813 常规 EXIT=0**（+2 个真模型 e2e 需云端） |
+| 测试用例 | **883 常规 EXIT=0**（+2 个真模型 e2e 需云端） |
 | 数据库表 | **15 张** / 5 个 store |
-| HTTP 端点 | **59 个** |
+| HTTP 端点 | **63 个路径**（含 4 个 llama.cpp：scan / status / start / stop；其中 7 个同时有 GET 和 PUT） |
 | 新增依赖 | 无（运行时仅 fastapi / pydantic / uvicorn / httpx / pillow + stdlib） |
 
 ### 发布状态
@@ -609,20 +609,54 @@ SOURCE_TYPES = ("context", "event", "correction")
 ```
 core 永远只持有 ModelRegistry（门面）
    ↓ settings_store.load()
-   ├─ provider == "openai"  → OpenAICompatibleProvider(base_url, model, api_key)
-   ├─ 有 ollama 配置        → OllamaAdapter(url, model)
-   └─ 配置无效              → _BrokenModel（占位，让 App 起不来时显式报错）
+   ├─ provider == "openai"    → OpenAICompatibleProvider(base_url, model, api_key)
+   ├─ provider == "llamacpp"  → LlamaCppAdapter(base_url) [+ 可选的启动器]
+   ├─ 有 ollama 配置          → OllamaAdapter(url, model)
+   └─ 配置无效                → _BrokenModel（占位，让 App 起不来时显式报错）
 ```
 
 | Provider | 类 | 流式 | 特点 |
 |---|---|---|---|
 | Ollama | `models/ollama_adapter.py` | ✅ `chat_stream_async` | 本地；**必须带 `"think": false` + `num_predict: 512`** |
+| llama.cpp | `models/llamacpp_adapter.py` | ✅ `chat_stream` | 本地 GGUF；可**一键启动** llama-server |
 | OpenAI-compatible | `models/openai_provider.py` | ✅ `chat_stream_async` | 云端（智谱等） |
 | Mock | `models/mock_adapter.py` | — | 测试用 |
 | Broken | `models/factory.py` | — | 配置无效占位 |
 
 **`think: false` 不可删**：Gemma-4 带 thinking 阶段，思考会吃光 token 预算导致
 **回答为空 / JSON 被截断**。见 §11 事故 #3。
+
+### llama.cpp（D028）为什么不能给 `-ngl`
+
+`LlamaCppServer.argv()` 默认**不传** `-ngl`，让 llama.cpp 自己按显存分配。
+
+实测：本机 RTX 3050 Laptop 只有 **4 GB 显存**，gpt-oss-20b 是 **11.3 GB**。
+`-ngl 99` 的真实结果是 `cudaMalloc failed: out of memory` → 进程直接退出。
+不给 `-ngl` 时 llama.cpp 把能放的层上 GPU、其余走 CPU，实测 **23 tok/s**。
+
+判定用 `is not None` 而不是真值 —— `ngl=0` 是有意义的（强制全 CPU）。
+
+### thinking 类模型的三条防线
+
+Ollama 那条靠 `"think": false` 从源头关掉；llama.cpp 那条关不掉
+（gpt-oss 走 harmony，思考内容在 `reasoning_content` 里），所以：
+
+1. 默认 `max_tokens = 1024`（给足）
+2. 回答为空时**自动加倍重试一次**
+3. `reasoning_content` **绝不进产品**——沉淀里出现"我先想了想…"是噪声
+
+### 启动器三条铁律
+
+`LlamaCppServer` 管理子进程，三条不可破：
+
+1. **绝不杀别人的进程**——`self.proc is None` 时只探不动。
+   `ours` 是由句柄推导的只读属性，语义只有一个出处。
+2. **启动前先探活**——已有健康服务直接复用，不重复加载 11 GB 模型。
+   复用时**沿用同一个对象**，换新的会丢掉句柄、让 `ours` 变 False。
+3. **`CREATE_NO_WINDOW`** —— 否则每次点启动都弹黑框。
+
+`LlamaCppServer.status()` 用 `/props` 而不是 `/health`：后者在模型没加载完时
+也返回 ok，会让用户看到"连接成功"然后聊天一直转圈。
 
 ---
 
@@ -635,7 +669,7 @@ core 永远只持有 ModelRegistry（门面）
 | **unit** | 多数 | 单个函数对不对（存储层数学、解析、投影） |
 | **integration** | `test_hypothesis_chain` / `test_first_run` / `test_pattern_flow` | 多个模块串起来通不通 |
 | **acceptance** | 6 个脚本 | 产品级验收（起服务、走 API、验 UI 存在） |
-| **mutation** | 4 个脚本 / **55 个变异** | **测试到底守没守住** |
+| **mutation** | 5 个脚本 / **76 个变异** | **测试到底守没守住** |
 | **replay / soak** | `soak_v0510.py` | 长时间连续跑会不会烂 |
 | **real-model** | `test_feedback_reale2e.py` | 真模型链路（需 `--deselect`，本机 Ollama 未跑） |
 
@@ -654,6 +688,7 @@ core 永远只持有 ModelRegistry（门面）
 | `mutation_judgment.py` | 17 | 三条安全闸门、否定语义、接线、context 链路 |
 | `mutation_runtime_time.py` | 11 | 时间不泄漏/不缓存/时区/相对时间确定性 |
 | `mutation_synthesis.py` | 17 | 跨 context 关系、独立性、候选保护、变化分界、双层守卫、自我证明 |
+| `mutation_llamacpp.py` | 21 | `-ngl` 不出现、thinking 重试、不误杀外部进程、身份不丢、provider 分支 |
 | `mutation_candidates.py` | 12 | 卡片不泄漏/不编造/不越权 |
 
 ### 为什么真实 replay 重要
