@@ -54,7 +54,12 @@ _SAVED_MARK = "beta_saved"
 
 # ---------------------------------------------------------------- 预设加载
 def load_preset() -> dict | None:
-    """读构建时注入的预设；没有就返回 None（= 功能不可用，不是出错）。"""
+    """读构建时注入的预设；没有就返回 None（= 功能不可用，不是出错）。
+
+    公开版里 `build_core.ps1` 会生成一个 **空 preset**（`PRESET = {}`），
+    于是这里走 `not p.get("provider")` 返回 None —— 明确、无歧义，
+    比"模块不在包里导致 import 失败"好排查得多。
+    """
     try:
         mod = __import__(_PRESET_MODULE, fromlist=["PRESET"])
     except Exception:
@@ -65,8 +70,46 @@ def load_preset() -> dict | None:
     return p
 
 
+def channel() -> str:
+    """构建渠道：'beta' / 'public' / ''。
+
+    只用于 UI 措辞与排查，**不参与任何功能判定**——
+    功能有没有只看 `enabled()`。
+    """
+    try:
+        mod = __import__(_PRESET_MODULE, fromlist=["BUILD_CHANNEL"])
+    except Exception:
+        return ""
+    return str(getattr(mod, "BUILD_CHANNEL", "") or "")
+
+
 def enabled() -> bool:
     return load_preset() is not None
+
+
+def preset_status() -> dict:
+    """给 UI 的可用性说明。**不返回 Key 本身。**
+
+    为什么要有这个：以前"Beta 不可用"只有一个布尔值，用户看到的是
+    「体验码无效或当前不可用」——分不清是码打错了还是这个包根本没有
+    Beta 功能。现在分开说清楚。
+    """
+    p = load_preset()
+    if p is None:
+        return {
+            "available": False,
+            "channel": channel(),
+            "reason": "当前版本不提供 Beta 一键配置（这是公开版，功能未开启）",
+        }
+    missing = [k for k in ("base_url", "model", "api_key") if not p.get(k)]
+    if missing:
+        log.warning("Beta 预设不完整，缺：%s", missing)
+        return {
+            "available": False,
+            "channel": channel(),
+            "reason": "Beta 预设不完整，无法一键配置",
+        }
+    return {"available": True, "channel": channel(), "reason": ""}
 
 
 def _expected_digests(preset: dict) -> list[str]:
@@ -114,12 +157,13 @@ def is_active() -> bool:
 
 
 def state() -> dict:
+    st = _read_state()
     return {
-        "available": enabled(),
+        **preset_status(),
         "active": is_active(),
-        "provider": _read_state().get("provider"),
-        "model": _read_state().get("model"),
-        "unlocked_at": _read_state().get("unlocked_at"),
+        "provider": st.get("provider"),
+        "model": st.get("model"),
+        "unlocked_at": st.get("unlocked_at"),
     }
 
 
@@ -161,7 +205,10 @@ def unlock(store, code: str) -> tuple[bool, str]:
     """
     preset = load_preset()
     if preset is None:
-        return False, "体验码无效或当前不可用"
+        # 区分两种情况：根本不是 Beta 包 vs 码不对。
+        # 以前一律说"体验码无效或当前不可用"，用户分不清自己输错了
+        # 还是装错了版本 —— 这里的差别决定了他下一步该做什么。
+        return False, preset_status()["reason"] or "体验码无效或当前不可用"
     if not verify_code(code):
         return False, "体验码无效或当前不可用"
 

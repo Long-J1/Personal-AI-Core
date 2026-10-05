@@ -476,10 +476,24 @@ def create_app(
 
     @app.on_event("startup")
     async def _startup():
-        """启动时：Beta 体验活跃但配置被外部改过 → 重新套用预设。
+        """启动时两件事，顺序有讲究：
 
-        没有活跃的 Beta 状态就什么都不做，绝不碰用户自己的配置。
+        1. **升级守卫**：检测到程序版本变了就先备份用户数据。
+           必须排在 Beta 套用**之前** —— 万一 Beta 预设套用把
+           model_settings.json 写坏了，那是在用户数据上动手。
+           先留底再动。
+        2. Beta 体验活跃但配置被外部改过 → 重新套用预设。
+           没有活跃的 Beta 状态就什么都不做，绝不碰用户自己的配置。
         """
+        try:
+            from core import upgrade_guard
+            res = upgrade_guard.on_startup(
+                data_dir=Path(DATA_DIR), db_path=store.db_path,
+                version=getattr(settings, "version", "unknown"))
+            if res.get("backed_up"):
+                log.info("升级前备份：%s", res["filename"])
+        except Exception as exc:      # 永不掀翻启动
+            log.warning("升级守卫失败（忽略）：%s", exc)
         try:
             from core import beta
             beta.apply_on_startup(model_settings_store)
