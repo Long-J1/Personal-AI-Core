@@ -83,7 +83,14 @@ MANAGED_STATUSES = tuple(_MANAGED)
 REVIEW_MIN_INDEPENDENT_DAYS = 2
 
 # under_review 期间，拿到这么多次支持就恢复 active。
-RESTORE_MIN_SUPPORT = 1
+#
+# ⚠️ 为什么改成"跨 2 个独立日期"而不是"1 条"（2026-10-06 校准）：
+# 1 条时，同**一天**反复说同一句话就能立刻把一条"已经进过复审"的
+# 理解拉回 active —— 而那句话往往就是当初触发复审的那句原话
+# 被重复了一遍。等于"用户又重复了一次"就能推翻系统的谨慎判断。
+# 复审是谨慎的产物，恢复也该同样谨慎：跨 2 天，
+# 意味着这个支持**不是同一时刻的回声**。
+RESTORE_MIN_SUPPORT_DAYS = 2
 
 # under_review 之后还要再跨这么多天反向，才真的失活。
 # 绝不等于 0 —— 0 会让"刚进 review 就立刻死"，一次误判就永久损失。
@@ -174,11 +181,42 @@ def is_visible_as_understanding(status: str) -> bool:
 
 
 def decide_reverse(*, status: str, independent_reverse_days: int,
-                   has_explicit_correction: bool) -> Decision:
+                   has_explicit_correction: bool,
+                   ever_reviewed: bool = False) -> Decision:
     """已经出现反向证据 → 该怎么走。**纯函数，无 IO。**
 
     显式纠正优先于所有计数：用户已经亲口给了答案，
     不需要再等系统慢慢数够天数。
+
+    `independent_reverse_days` 由调用方给出，语义是
+    **「距离上一次状态变更之后」的反证独立日期数**。
+
+    `ever_reviewed` 表示这条理解曾经进过 review（又恢复了）。
+    它只用来在**恢复后的第一次降级**上加一道"确认条件"（见下）。
+
+    ---
+    为什么需要 ever_reviewed（抖动修复）
+    --------------------------------------
+    真机 replay 抓到的：10 天里每天「一条反向 + 一条支持」，
+    状态翻转 **19 次**，几乎每天来回两次。
+
+    根因不是阈值太小，而是**恢复后旧反证仍被计数**：
+    恢复 active 时 `status_changed_epoch` 从没被刷新（实测恒为 0.0），
+    于是 `_reverse_days` 数的是"这条理解一生"的反证日期。
+    已经攒够 2 天的老反证一直垫着，恢复后**只要再出现 1 天反向
+    就又进 review**。
+
+    修法分两层，都在这一层做：
+    1. 调用方一律按 `status_changed_epoch` 取起点（恢复时刷新它）——
+       这样天数是"本轮"而不是"一生"。
+    2. 曾经复审过的理解，恢复后的第一次降级要**跨满 2 天**
+       才允许（下面 `ever_reviewed` 那一步）。
+
+    第 2 条为什么还需要：第 1 条修好后，用户刚恢复 active 的**当天**
+    就来一条反向，天数正好是 1 —— 差一天。系统会在
+    "支持 → 反向" 的同一轮里连续判两次，用户在 UI 上看到的是
+    刚亮起来的"稳定理解"瞬间又变成"待复审"。加上这道确认条件
+    之后，那一天的反向不生效，要等到第二天。
     """
     if has_explicit_correction:
         if status == INACTIVE:
@@ -191,6 +229,19 @@ def decide_reverse(*, status: str, independent_reverse_days: int,
 
     if status == INACTIVE:
         return Decision(False, INACTIVE, INACTIVE, "已失活，等新的支持重新建立")
+
+    # 恢复 active 之后的第一次降级：要求跨满 **3 天**（= review 门槛 +1）。
+    #
+    # ⚠️ 这里必须是 REVIEW_MIN + 1，不是 REVIEW_MIN：
+    # 守卫写成 `< REVIEW_MIN` 时，days 恰好等于 2（唯一会触发降级的
+    # 那个天数）会绕过它落到通用分支 —— 守卫等于没写。
+    # 这是 mutation O 抓出来的：把 ever_reviewed 硬编码 False 时，
+    # 只测"字段被记录"的测试全绿，只有直接验"它改变行为"才抓得住。
+    if ever_reviewed and status in PROMPT_STATUSES \
+            and independent_reverse_days < (REVIEW_MIN_INDEPENDENT_DAYS + 1):
+        return Decision(False, status, status,
+                        "刚复审过，恢复后反证还不够独立（日数不足）",
+                        independent_reverse_days)
 
     if independent_reverse_days < REVIEW_MIN_INDEPENDENT_DAYS:
         return Decision(False, status, status, "反证还不够独立（日数不足）",
@@ -209,21 +260,29 @@ def decide_reverse(*, status: str, independent_reverse_days: int,
                     "多个独立日期都出现了相反的情况", independent_reverse_days)
 
 
-def decide_support(*, status: str, support_since_review: int) -> Decision:
+def decide_support(*, status: str, support_since_review: int,
+                   support_independent_days: int = 0) -> Decision:
     """又出现了支持原理解的证据 → 该怎么走。**纯函数，无 IO。**
 
-    under_review + 至少一次支持 → 回到 active。
+    under_review + 跨足够多的独立日期支持 → 回到 active。
+
     这条路径**不检查置信度**：进 review 的依据是反证，
     恢复的依据该是"又看到反过来的事实"，而不是"分数攒够了"。
     分数那条路（毕业）本来就有，不在这里复制。
+
+    `support_since_review` 保留是为了 log 与诊断；
+    判定用 `support_independent_days`（和反向一样按 origin 去重，
+    即"跨几天"）。
     """
     if status != UNDER_REVIEW:
         return Decision(False, status, status, "不在复审中")
-    if support_since_review < RESTORE_MIN_SUPPORT:
-        return Decision(False, UNDER_REVIEW, UNDER_REVIEW, "支持还不够")
+    if support_independent_days < RESTORE_MIN_SUPPORT_DAYS:
+        return Decision(False, UNDER_REVIEW, UNDER_REVIEW,
+                        "支持还不够独立（同一天的重复不算）",
+                        support_since_review)
     return Decision(True, UNDER_REVIEW, "tentative",
-                    "复审期间又出现了支持原理解的情况",
-                    support_since_review=support_since_review)
+                    "复审期间又在多个独立日期看到了支持",
+                    support_since_review)
 
 
 def status_detail(decided_at_epoch: float | None) -> str:
@@ -277,6 +336,21 @@ class StabilityBridge:
             ).fetchone()
         return int(row[0])
 
+    def _support_days(self, hypo_id: str, since_epoch: float | None) -> int:
+        """支持证据的**独立日期数**。
+
+        和 `_reverse_days` 同一个口径（按 origin 去重）—— 恢复门槛
+        用它而不是条数，否则同一天反复说同一句话就能立刻恢复。
+        """
+        with self.store._connect() as con:
+            rows = con.execute(
+                "SELECT DISTINCT origin FROM hypothesis_evidence"
+                " WHERE hypothesis_id=? AND polarity='support'"
+                + (" AND created_at_epoch >= ?" if since_epoch else ""),
+                ((hypo_id, since_epoch) if since_epoch else (hypo_id,)),
+            ).fetchall()
+        return len(rows)
+
     # ---------- 动作 ----------
     def _apply(self, hypo_id: str, dec: Decision) -> None:
         """写 status + 一条 log。**不改 confidence**。
@@ -285,19 +359,38 @@ class StabilityBridge:
         稳定性表达"这条现在该不该被当成结论用"。两件事。
         让 review 也去压分数，会让"复审中"这条理解在重新得到支持后
         因为分数已经掉下去而永远升不回来。
+
+        ⚠️ **`status_changed_epoch` 必须在每一次状态变化时刷新**，
+        包括**恢复 active**。这是抖动修复的核心之一：它一旦不刷新，
+        反向天数就会一直数"一生累计"，恢复后差一天就又进 review
+        （实测 10 天翻转 19 次）。本轮 replay 抓到的真 bug。
         """
         import json
         import time
+        now = time.time()
         now_iso = time.strftime("%Y-%m-%dT%H:%M:%S")
+        # 进过 review 就标记上，且**永不回退** —— 它记的是"历史上
+        # 复审过"，不是"当前是否在复审"。
+        mark = 1 if dec.to_status == UNDER_REVIEW else None
         with self.store._lock:
             with self.store._connect() as con:
                 with con:
-                    con.execute(
-                        "UPDATE hypotheses SET status=?, status_detail=?,"
-                        " updated_at_iso=?, updated_at_epoch=? WHERE id=?",
-                        (dec.to_status, status_detail(time.time()),
-                         now_iso, time.time(), hypo_id),
-                    )
+                    if mark is not None:
+                        con.execute(
+                            "UPDATE hypotheses SET status=?, status_detail=?,"
+                            " status_changed_epoch=?, ever_reviewed=1,"
+                            " updated_at_iso=?, updated_at_epoch=? WHERE id=?",
+                            (dec.to_status, status_detail(now),
+                             now, now_iso, now, hypo_id),
+                        )
+                    else:
+                        con.execute(
+                            "UPDATE hypotheses SET status=?, status_detail=?,"
+                            " status_changed_epoch=?,"
+                            " updated_at_iso=?, updated_at_epoch=? WHERE id=?",
+                            (dec.to_status, status_detail(now),
+                             now, now_iso, now, hypo_id),
+                        )
                     con.execute(
                         "INSERT INTO hypothesis_log (id, epoch, iso, action,"
                         " hypothesis_id, detail)"
@@ -324,11 +417,16 @@ class StabilityBridge:
             # 被闸门挡下：AI 自己产的、或用户已否决/删除的 —— 一律不动。
             return Decision(False, hypo.status, hypo.status,
                             "这条证据没有资格改变正式理解")
-        since = hypo.status_changed_epoch if hypo.status == UNDER_REVIEW else None
+        # **起点一律用 status_changed_epoch，不管当前是什么状态。**
+        # 这条是本轮抖动修复的核心（见模块 docstring「抖动」一节）：
+        # 恢复 active 时如果不刷新它，旧反证会一直被算着，于是
+        # 恢复后差一天就又翻脸。
+        since = hypo.status_changed_epoch or None
         days = self._reverse_days(hypo_id, since)
         dec = decide_reverse(status=hypo.status,
                              independent_reverse_days=days,
-                             has_explicit_correction=explicit)
+                             has_explicit_correction=explicit,
+                             ever_reviewed=bool(hypo.ever_reviewed))
         if dec.changed:
             self._apply(hypo_id, dec)
         return dec
@@ -338,9 +436,11 @@ class StabilityBridge:
         hypo = self.store.get(hypo_id)
         if hypo is None:
             return Decision(False, "", "", "假设不存在")
-        since = hypo.status_changed_epoch if hypo.status == UNDER_REVIEW else None
+        since = hypo.status_changed_epoch or None
         n = self._support_since(hypo_id, since)
-        dec = decide_support(status=hypo.status, support_since_review=n)
+        days = self._support_days(hypo_id, since)
+        dec = decide_support(status=hypo.status, support_since_review=n,
+                             support_independent_days=days)
         if dec.changed:
             self._apply(hypo_id, dec)
         return dec

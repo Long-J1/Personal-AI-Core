@@ -517,6 +517,7 @@ def test_synthesis_prefix_guard_blocks_pattern_promotion():
                 "support_count": 0, "contradict_count": 0, "used_count": 0,
                 "asked_count": 0, "last_asked_epoch": 0, "pending_question": "",
                 "status_detail": "", "status_changed_epoch": 0.0,
+                "ever_reviewed": 0,
                 "created_at_iso": iso, "created_at_epoch": ep,
                 "updated_at_iso": iso, "updated_at_epoch": ep}
 

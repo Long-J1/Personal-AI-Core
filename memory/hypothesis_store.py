@@ -101,7 +101,8 @@ CREATE TABLE IF NOT EXISTS hypotheses (
   updated_at_iso TEXT NOT NULL,
   updated_at_epoch REAL NOT NULL,
   status_detail TEXT NOT NULL DEFAULT '',
-  status_changed_epoch REAL NOT NULL DEFAULT 0
+  status_changed_epoch REAL NOT NULL DEFAULT 0,
+  ever_reviewed INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_hypo_status ON hypotheses(status, updated_at_epoch);
 
@@ -148,6 +149,11 @@ CREATE INDEX IF NOT EXISTS idx_hl_hypo ON hypothesis_log(hypothesis_id, epoch);
 _STABILITY_MIGRATION = (
     ("status_detail", "TEXT NOT NULL DEFAULT ''"),
     ("status_changed_epoch", "REAL NOT NULL DEFAULT 0"),
+    # 曾进过 review（又恢复了）。抖动修复用：恢复后的第一次降级
+    # 要跨满 2 天，而不是复用恢复前攒下的反证天数。
+    # 老行是 0（= 从未复审），语义正确：历史理解不会因为升级
+    # 就突然被当成"复审过的"，那会让它们的降级门槛莫名变严。
+    ("ever_reviewed", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -193,7 +199,7 @@ class Hypothesis:
         # Understanding Stability：这两列加了就必须同步加进 __slots__,
         # 否则 self.status_detail = ... 会抛 AttributeError（__slots__ 类
         # 不允许动态属性）。这是本类加字段时最容易漏的一步。
-        "status_detail", "status_changed_epoch",
+        "status_detail", "status_changed_epoch", "ever_reviewed",
         "created_at", "updated_at",
     )
 
@@ -214,6 +220,7 @@ class Hypothesis:
         pending_question: str = "",
         status_detail: str = "",
         status_changed_epoch: float = 0.0,
+        ever_reviewed: int = 0,
     ):
         self.id = id
         self.statement = statement
@@ -230,6 +237,7 @@ class Hypothesis:
         # （"" = 没有状态说明，0.0 = 从未被复审过）
         self.status_detail = status_detail
         self.status_changed_epoch = status_changed_epoch
+        self.ever_reviewed = ever_reviewed
         self.created_at = created_at
         self.updated_at = updated_at
 
@@ -347,6 +355,8 @@ class HypothesisStore:
                            if "status_detail" in keys else ""),
             status_changed_epoch=(row["status_changed_epoch"]
                                   if "status_changed_epoch" in keys else 0.0),
+            ever_reviewed=(row["ever_reviewed"]
+                           if "ever_reviewed" in keys else 0),
             created_at=datetime.fromisoformat(row["created_at_iso"]),
             updated_at=datetime.fromisoformat(row["updated_at_iso"]),
         )

@@ -20,8 +20,8 @@ from core.understanding_stability import (
     INACTIVE,
     INACTIVE_MIN_INDEPENDENT_DAYS,
     PROMPT_STATUSES,
-    RESTORE_MIN_SUPPORT,
     REVIEW_MIN_INDEPENDENT_DAYS,
+    RESTORE_MIN_SUPPORT_DAYS,
     UNDER_REVIEW,
     StabilityBridge,
     can_reverse_understanding,
@@ -136,21 +136,284 @@ def test_explicit_correction_on_already_inactive_is_noop():
 
 
 def test_review_restores_on_support():
-    d = decide_support(status=UNDER_REVIEW, support_since_review=1)
+    """恢复要**跨 2 个独立日期**（2026-10-06 校准，见下）。"""
+    d = decide_support(status=UNDER_REVIEW, support_since_review=1,
+                       support_independent_days=2)
     assert d.changed is True
     assert d.to_status == "tentative"
 
 
+def test_same_day_support_does_not_restore():
+    """同一天重复同一句原话**不足以**恢复。
+
+    这是本轮抖动校准的第二处：1 条支持就能恢复时，用户在同一天
+    把当初触发复审的那句话再说一遍，就能立刻推翻系统的谨慎判断。
+    复审是谨慎的产物，恢复也该同样谨慎。
+    """
+    d = decide_support(status=UNDER_REVIEW, support_since_review=3,
+                       support_independent_days=1)
+    assert d.changed is False
+    assert d.to_status == UNDER_REVIEW
+
+
 def test_restore_needs_no_score_climbing():
     """恢复的依据是"又看到反过来的事实"，不是"分数攒够"。
-    所以 support_since_review=1 就够，且不做任何分数判断。"""
-    assert RESTORE_MIN_SUPPORT == 1
-    d = decide_support(status=UNDER_REVIEW, support_since_review=0)
-    assert d.changed is False
+
+    判定只看跨几天，**完全不看置信度**。
+    """
+    d = decide_support(status=UNDER_REVIEW, support_since_review=0,
+                       support_independent_days=2)
+    assert d.changed is True
+
+
+def test_restore_threshold_is_exactly_two_days():
+    """卡在两侧各测一次，不引用模块常量（否则变异会跟着一起变绿）。"""
+    assert decide_support(status=UNDER_REVIEW, support_since_review=1,
+                          support_independent_days=1).changed is False
+    assert decide_support(status=UNDER_REVIEW, support_since_review=1,
+                          support_independent_days=2).changed is True
+
+
+# ---------------------------------------------- 抖动校准（2026-10-06）
+
+def test_status_changed_epoch_refreshed_on_restore(tmp_path):
+    """**恢复 active 时必须刷新 status_changed_epoch**。
+
+    这是抖动的头号根因：它不刷新 → 反向天数一直数"一生累计" →
+    恢复后只要再来 1 天反向就又进 review（实测 10 天翻转 19 次）。
+    """
+    store = HypothesisStore(tmp_path / "t.db")
+    ctx = ContextStore(tmp_path / "t.db")
+    bridge = StabilityBridge(store)
+    h, _ = store.create(statement="用户晚上学习。", scope="activity:学习")
+    for d in (0, 1):
+        cid = _ctx_on_day(ctx, f"下午 {d}", day_offset=d)
+        store.add_evidence(h.id, "contradict", "context", cid)
+    bridge.on_reverse_evidence(h.id, source_type="context")
+    entered = store.get(h.id).status_changed_epoch
+    assert entered > 0, "进 review 时就该刷新"
+
+    for d in (2, 3):
+        cid = _ctx_on_day(ctx, f"晚上 {d}", day_offset=d)
+        store.add_evidence(h.id, "support", "context", cid)
+    bridge.on_support_evidence(h.id)
+    restored = store.get(h.id)
+    assert restored.status == "tentative"
+    assert restored.status_changed_epoch > entered, \
+        "恢复时必须刷新起点，否则旧反证一直被计数"
+
+
+def test_reverse_days_counted_since_last_transition_only(tmp_path):
+    """恢复后旧的反证**不再计入**（跨 1 天不该又翻脸）。"""
+    store = HypothesisStore(tmp_path / "t.db")
+    ctx = ContextStore(tmp_path / "t.db")
+    bridge = StabilityBridge(store)
+    h, _ = store.create(statement="用户晚上学习。", scope="activity:学习")
+    for d in (0, 1):
+        cid = _ctx_on_day(ctx, f"下午 {d}", day_offset=d)
+        store.add_evidence(h.id, "contradict", "context", cid)
+    bridge.on_reverse_evidence(h.id, source_type="context")
+    assert store.get(h.id).status == UNDER_REVIEW
+    for d in (2, 3):
+        cid = _ctx_on_day(ctx, f"晚上 {d}", day_offset=d)
+        store.add_evidence(h.id, "support", "context", cid)
+    bridge.on_support_evidence(h.id)
+    assert store.get(h.id).status == "tentative"
+
+    # 恢复后才 1 天反向 → 不该又 review
+    cid = _ctx_on_day(ctx, "只有一天下午", day_offset=0)
+    store.add_evidence(h.id, "contradict", "context", cid)
+    dec = bridge.on_reverse_evidence(h.id, source_type="context")
+    assert dec.independent_reverse_days == 1, "旧反证不该被算进来"
+    assert dec.changed is False
+    assert store.get(h.id).status == "tentative"
+
+
+def test_ever_reviewed_actually_raises_the_bar(tmp_path):
+    """`ever_reviewed` 必须**真的影响判定**，不只是被记录。
+
+    这条是 mutation O 抓出来的：把 `ever_reviewed` 硬编码 False
+    （等于"曾复审过"这个信息被忽略）时，字段相关的断言全绿，
+    只有直接验"它改变了行为"才抓得住。
+
+    场景：曾经进过 review → 恢复 active → **同一天**来 1 条反向。
+      · 考虑 ever_reviewed：进 review 当天不受影响（还没跨日）
+      · 忽略 ever_reviewed：只要 `independent_reverse_days >= 2` 就翻脸
+    所以要让"天数刚好够 2 但都在同一天"这个前提成立，
+    才能区分两者。
+    """
+    store = HypothesisStore(tmp_path / "t.db")
+    ctx = ContextStore(tmp_path / "t.db")
+    bridge = StabilityBridge(store)
+    h, _ = store.create(statement="用户晚上学习。", scope="activity:学习")
+    for d in (0, 1):
+        cid = _ctx_on_day(ctx, f"下午 {d}", day_offset=d)
+        store.add_evidence(h.id, "contradict", "context", cid)
+    bridge.on_reverse_evidence(h.id, source_type="context")
+    assert store.get(h.id).status == UNDER_REVIEW
+    for d in (2, 3):
+        cid = _ctx_on_day(ctx, f"晚上 {d}", day_offset=d)
+        store.add_evidence(h.id, "support", "context", cid)
+    bridge.on_support_evidence(h.id)
+    assert store.get(h.id).status == "tentative"
+    assert store.get(h.id).ever_reviewed == 1
+
+    # days=2 是唯一会触发降级的那个天数 —— 曾复审过的必须被拦住
+    dec_guarded = decide_reverse(status="tentative", independent_reverse_days=2,
+                                 has_explicit_correction=False,
+                                 ever_reviewed=True)
+    dec_plain = decide_reverse(status="tentative", independent_reverse_days=2,
+                               has_explicit_correction=False,
+                               ever_reviewed=False)
+    assert dec_plain.changed is True
+    assert dec_guarded.changed is False, "曾复审过的，降级该更谨慎"
+    # 跨满 3 天才放行（= review 门槛 + 1）
+    assert decide_reverse(status="tentative", independent_reverse_days=3,
+                          has_explicit_correction=False,
+                          ever_reviewed=True).changed is True
+
+
+def test_restore_guard_needs_one_more_day_than_review_threshold():
+    """守卫必须是 `REVIEW_MIN + 1`，写成 `REVIEW_MIN` 等于没写。
+
+    days 恰好等于 REVIEW_MIN（2）是**唯一**会触发降级的天数，
+    `< REVIEW_MIN` 在那里为假 —— 守卫被绕过，直落通用分支。
+    """
+    blocked = decide_reverse(status="tentative", independent_reverse_days=2,
+                            has_explicit_correction=False, ever_reviewed=True)
+    assert blocked.changed is False, "守卫在 days==REVIEW_MIN 处失效了"
+    # 而没复审过的，同一个天数仍然应该降级（守卫不该影响首次）
+    normal = decide_reverse(status="tentative", independent_reverse_days=2,
+                            has_explicit_correction=False, ever_reviewed=False)
+    assert normal.changed is True
+
+
+def test_ever_reviewed_is_recorded_and_never_cleared(tmp_path):
+    store = HypothesisStore(tmp_path / "t.db")
+    ctx = ContextStore(tmp_path / "t.db")
+    bridge = StabilityBridge(store)
+    h, _ = store.create(statement="用户晚上学习。", scope="activity:学习")
+    assert store.get(h.id).ever_reviewed == 0
+    for d in (0, 1):
+        cid = _ctx_on_day(ctx, f"下午 {d}", day_offset=d)
+        store.add_evidence(h.id, "contradict", "context", cid)
+    bridge.on_reverse_evidence(h.id, source_type="context")
+    assert store.get(h.id).ever_reviewed == 1
+    for d in (2, 3):
+        cid = _ctx_on_day(ctx, f"晚上 {d}", day_offset=d)
+        store.add_evidence(h.id, "support", "context", cid)
+    bridge.on_support_evidence(h.id)
+    assert store.get(h.id).status == "tentative"
+    assert store.get(h.id).ever_reviewed == 1, "恢复不该把『曾复审过』清掉"
+
+
+def test_no_flap_in_alternating_scenario(tmp_path):
+    """**replay 版的抖动回归测试**：每天一反一正，10 天内翻转次数。
+
+    修之前是 19 次（约每天 2 次 = 抖动），修之后约 10 次（每天 1 次）。
+    这里断言"每天不超过 1.5 次"—— 现实真在反复时一天变一次是合理的，
+    一天变两次才是抖动。
+    """
+    store = HypothesisStore(tmp_path / "t.db")
+    ctx = ContextStore(tmp_path / "t.db")
+    bridge = StabilityBridge(store)
+    h, _ = store.create(statement="用户通常在晚上学习。", scope="activity:学习")
+    for d in (30, 29, 28):
+        cid = _ctx_on_day(ctx, f"晚 {d}", day_offset=d)
+        store.add_evidence(h.id, "support", "context", cid)
+    for d in (2, 1):
+        cid = _ctx_on_day(ctx, f"下午 {d}", day_offset=d)
+        store.add_evidence(h.id, "contradict", "context", cid)
+    bridge.on_reverse_evidence(h.id, source_type="context")
+
+    flips = 0
+    prev = store.get(h.id).status
+    days = 10
+    for d in range(days):
+        cid = _ctx_on_day(ctx, f"第{d}天下午", day_offset=d)
+        store.add_evidence(h.id, "contradict", "context", cid)
+        bridge.on_reverse_evidence(h.id, source_type="context")
+        cur = store.get(h.id).status
+        flips += (cur != prev)
+        prev = cur
+        cid = _ctx_on_day(ctx, f"第{d}天晚学", day_offset=d)
+        store.add_evidence(h.id, "support", "context", cid)
+        bridge.on_support_evidence(h.id)
+        cur = store.get(h.id).status
+        flips += (cur != prev)
+        prev = cur
+    assert flips <= days * 1.5, f"抖动未修：{days} 天翻转 {flips} 次"
+
+
+def test_alternating_scenario_still_recovers(tmp_path):
+    """反过来也不能修过头：持续跨日支持时必须能恢复，不能卡在 review。"""
+    store = HypothesisStore(tmp_path / "t.db")
+    ctx = ContextStore(tmp_path / "t.db")
+    bridge = StabilityBridge(store)
+    h, _ = store.create(statement="用户通常在晚上学习。", scope="activity:学习")
+    for d in (0, 1):
+        cid = _ctx_on_day(ctx, f"下午 {d}", day_offset=d)
+        store.add_evidence(h.id, "contradict", "context", cid)
+    bridge.on_reverse_evidence(h.id, source_type="context")
+    assert store.get(h.id).status == UNDER_REVIEW
+    for d in (2, 3):
+        cid = _ctx_on_day(ctx, f"晚上 {d}", day_offset=d)
+        store.add_evidence(h.id, "support", "context", cid)
+    bridge.on_support_evidence(h.id)
+    assert store.get(h.id).status == "tentative"
+
+
+def test_explicit_correction_not_revived_by_new_evidence(tmp_path):
+    """Story C：失活之后新的独立证据不得错误复活。"""
+    store = HypothesisStore(tmp_path / "t.db")
+    ctx = ContextStore(tmp_path / "t.db")
+    bridge = StabilityBridge(store)
+    h, _ = store.create(statement="用户晚上学习。", scope="activity:学习")
+    cid = _ctx_on_day(ctx, "我晚上学习")
+    store.add_evidence(h.id, "support", "context", cid)
+    bridge.on_reverse_evidence(h.id, source_type="correction", explicit=True)
+    assert store.get(h.id).status == INACTIVE
+    for d in (3, 2, 1):
+        cid = _ctx_on_day(ctx, f"新观察 {d}", day_offset=d)
+        store.add_evidence(h.id, "contradict", "context", cid)
+    bridge.on_reverse_evidence(h.id, source_type="context")
+    cid = _ctx_on_day(ctx, "新支持", day_offset=0)
+    store.add_evidence(h.id, "support", "context", cid)
+    bridge.on_support_evidence(h.id)
+    assert store.get(h.id).status == INACTIVE
+
+
+def test_still_reenters_review_after_recovery(tmp_path):
+    """Story B：恢复之后长期反向，必须还能再次进 review（不是卡死 active）。"""
+    store = HypothesisStore(tmp_path / "t.db")
+    ctx = ContextStore(tmp_path / "t.db")
+    bridge = StabilityBridge(store)
+    h, _ = store.create(statement="用户通常在晚上学习。", scope="activity:学习")
+    for d in (0, 1):
+        cid = _ctx_on_day(ctx, f"下午 {d}", day_offset=d)
+        store.add_evidence(h.id, "contradict", "context", cid)
+    bridge.on_reverse_evidence(h.id, source_type="context")
+    for d in (2, 3):
+        cid = _ctx_on_day(ctx, f"晚上 {d}", day_offset=d)
+        store.add_evidence(h.id, "support", "context", cid)
+    bridge.on_support_evidence(h.id)
+    assert store.get(h.id).status == "tentative"
+    # 恢复之后又跨 3 天反向 → 再次 review
+    # （刚复审过的降级门槛 = review 门槛 +1 = 3 天）
+    for d in (4, 5):
+        cid = _ctx_on_day(ctx, f"又下午 {d}", day_offset=d)
+        store.add_evidence(h.id, "contradict", "context", cid)
+    assert bridge.on_reverse_evidence(h.id, source_type="context").changed is False
+    cid = _ctx_on_day(ctx, "第三天又下午", day_offset=6)
+    store.add_evidence(h.id, "contradict", "context", cid)
+    dec = bridge.on_reverse_evidence(h.id, source_type="context")
+    assert dec.changed is True
+    assert store.get(h.id).status == UNDER_REVIEW
 
 
 def test_support_on_active_is_noop():
-    d = decide_support(status="tentative", support_since_review=5)
+    d = decide_support(status="tentative", support_since_review=5,
+                       support_independent_days=5)
     assert d.changed is False
 
 
@@ -345,9 +608,11 @@ def test_review_restores_to_active(world):
     bridge.on_reverse_evidence(h.id, source_type="context")
     assert store.get(h.id).status == UNDER_REVIEW
 
-    # 又在晚上学 —— 新的一条支持
-    cid = _ctx_on_day(ctx, "今天晚上学习", day_offset=0)
-    store.add_evidence(h.id, "support", "context", cid)
+    # 又在晚上学 —— 恢复门槛是**跨 2 个独立日期**
+    # （2026-10-06 校准：1 条时同一天重复原话就能推翻复审）
+    for d in (2, 3):
+        cid = _ctx_on_day(ctx, f"晚上学习 {d}", day_offset=d)
+        store.add_evidence(h.id, "support", "context", cid)
     dec = bridge.on_support_evidence(h.id)
     assert dec.changed is True
     assert store.get(h.id).status == "tentative"
@@ -360,8 +625,9 @@ def test_review_eventually_inactive(world):
         cid = _ctx_on_day(ctx, f"下午学习 {d}", day_offset=d)
         store.add_evidence(h.id, "contradict", "context", cid)
     bridge.on_reverse_evidence(h.id, source_type="context")
-    # review 之后又跨 3 天反向
-    for d in (2, 3, 4):
+    # review 之后**再跨 3 天**反向（起点是进 review 的那一刻，
+    # 不是这条理解一生）→ 2 + 3 = 5 个独立日期
+    for d in (2, 3, 4, 5, 6):
         cid = _ctx_on_day(ctx, f"下午学习续 {d}", day_offset=d)
         store.add_evidence(h.id, "contradict", "context", cid)
     dec = bridge.on_reverse_evidence(h.id, source_type="context")

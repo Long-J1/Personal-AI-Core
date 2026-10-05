@@ -132,24 +132,59 @@ MUTATIONS = [
 
     ("K", "复审时额外压低置信度（恢复时升不回来）",
      US,
-     '                    con.execute(\n'
-     '                        "UPDATE hypotheses SET status=?, status_detail=?,"\n'
-     '                        " updated_at_iso=?, updated_at_epoch=? WHERE id=?",\n'
-     '                        (dec.to_status, status_detail(time.time()),\n'
-     '                         now_iso, time.time(), hypo_id),\n'
-     '                    )',
-     '                    con.execute(\n'
-     '                        "UPDATE hypotheses SET status=?, status_detail=?,'
+     '                        con.execute(\n'
+     '                            "UPDATE hypotheses SET status=?, status_detail=?,"\n'
+     '                            " status_changed_epoch=?, ever_reviewed=1,"\n'
+     '                            " updated_at_iso=?, updated_at_epoch=? WHERE id=?",',
+     '                        con.execute(\n'
+     '                            "UPDATE hypotheses SET status=?, status_detail=?,'
      ' confidence=confidence-0.3,"\n'
-     '                        " updated_at_iso=?, updated_at_epoch=? WHERE id=?",\n'
-     '                        (dec.to_status, status_detail(time.time()),\n'
-     '                         now_iso, time.time(), hypo_id),\n'
-     '                    )'),
+     '                            " status_changed_epoch=?, ever_reviewed=1,"\n'
+     '                            " updated_at_iso=?, updated_at_epoch=? WHERE id=?",'),
 
     ("L", "rejected / deleted 也纳入可改写状态（覆盖用户终局决定）",
      US,
      "    if status not in MANAGED_STATUSES:\n        return False",
      "    if False:\n        return False"),
+
+    # ---- 抖动校准（2026-10-06）：三条都是 replay 抓到的真问题 ----
+    ("M", "恢复 active 时不刷新 status_changed_epoch（旧反证一直被计数）",
+     US,
+     '                            " status_changed_epoch=?, ever_reviewed=1,"\n'
+     '                            " updated_at_iso=?, updated_at_epoch=? WHERE id=?",\n'
+     '                            (dec.to_status, status_detail(now),\n'
+     '                             now, now_iso, now, hypo_id),\n'
+     '                        )\n'
+     '                    else:',
+     '                            " ever_reviewed=1,"\n'
+     '                            " updated_at_iso=?, updated_at_epoch=? WHERE id=?",\n'
+     '                            (dec.to_status, status_detail(now),\n'
+     '                             now_iso, now, hypo_id),\n'
+     '                        )\n'
+     '                    else:'),
+
+    ("M2", "起点不看上次状态变更（天数又变回一生累计 → 抖动）",
+     US,
+     "        since = hypo.status_changed_epoch or None\n"
+     "        days = self._reverse_days(hypo_id, since)\n"
+     "        dec = decide_reverse(status=hypo.status,",
+     "        days = self._reverse_days(hypo_id, None)\n"
+     "        dec = decide_reverse(status=hypo.status,"),
+
+    ("N", "恢复门槛退回 1 条支持（同一天重复原话就能推翻复审）",
+     US,
+     "    if support_independent_days < RESTORE_MIN_SUPPORT_DAYS:",
+     "    if support_independent_days < 1:"),
+
+    ("N2", "恢复不再要求独立日期（只看条数）",
+     US,
+     "    if support_independent_days < RESTORE_MIN_SUPPORT_DAYS:",
+     "    if support_since_review < 1:"),
+
+    ("O", "ever_reviewed 被清掉（恢复后第一次降级不再要求确认）",
+     US,
+     "                             ever_reviewed=bool(hypo.ever_reviewed))",
+     "                             ever_reviewed=False)"),
 ]
 
 
