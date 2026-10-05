@@ -59,7 +59,7 @@ class Settings:
     idle_reasoning_enabled: bool = os.environ.get(
         "PAI_IDLE_REASONING", "0") == "1"
 
-    version: str = "0.6.0-beta.1"
+    version: str = "0.6.0"
 
 
 settings = Settings()

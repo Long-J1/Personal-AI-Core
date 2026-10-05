@@ -219,6 +219,80 @@ def test_default_data_dir_is_not_under_install_dir():
     assert "Programs" not in str(data)
 
 
+def test_public_build_clears_stale_beta_state(tmp_path, monkeypatch, beta_dir):
+    """**回退到公开版时必须清掉残留的 Beta 标记。**
+
+    真机上撞到的：装过 Beta 版 → 换成公开版，`beta_state.json` 里的
+    active 标记还在，于是 `is_active()` 为 True，UI 显示一个
+    "点了也没用"的 Beta 入口——用户会以为是自己操作坏了。
+
+    这条测试钉住：公开版里 active 恒为 False，且启动时会自行清理。
+    """
+    import sys
+    import types
+    from core import beta
+    from memory.hypothesis_store import HypothesisStore
+    from models.settings_store import ModelSettingsStore
+
+    # 先造出"Beta 版已激活"的现场
+    mod = types.ModuleType("models._beta_preset")
+    mod.PRESET = {"provider": "openai", "base_url": "http://b/v1",
+                  "model": "b", "api_key": "sk-b", "code_sha256": []}
+    mod.BUILD_CHANNEL = "beta"
+    monkeypatch.setitem(sys.modules, "models._beta_preset", mod)
+    # beta 模块用模块级 DATA_DIR 定位状态文件，测试必须指向 tmp，
+    # 否则会写进**真实用户数据目录**。
+    monkeypatch.setattr(beta, "DATA_DIR", tmp_path)
+    db = tmp_path / "t.db"
+    hyp = HypothesisStore(db)
+    h, _ = hyp.create(statement="用户理解", scope="activity:x")
+    st = ModelSettingsStore(tmp_path / "ms.json")
+    st.update({"provider": "openai",
+               "openai": {"base_url": "http://mine/v1", "model": "mine",
+                          "api_key": "sk-mine"}})
+    # 走**真实**的 unlock 造出"已激活"现场（而不是手工写状态文件）——
+    # 这样测的是真路径，也顺带验了 backup 文件确实被写出来了。
+    import hashlib
+    code = "REAL-CODE"
+    mod.PRESET["code_sha256"] = [hashlib.sha256(code.encode()).hexdigest()]
+    ok, _ = beta.unlock(st, code)
+    assert ok is True
+    assert beta.is_active() is True
+    assert (tmp_path / "saved_config.json").exists(), "解锁前配置应被备份"
+
+    # 换成公开版（空 preset）
+    pub = types.ModuleType("models._beta_preset")
+    pub.PRESET = {}
+    pub.BUILD_CHANNEL = "public"
+    monkeypatch.setitem(sys.modules, "models._beta_preset", pub)
+    assert beta.enabled() is False
+    assert beta.is_active() is False, "公开版里不该还认 Beta 激活"
+
+    beta.apply_on_startup(st)
+    # 残留标记与备份都被清掉
+    assert not (tmp_path / "beta_state.json").exists()
+    assert not (tmp_path / "saved_config.json").exists()
+    # **配置与数据都没被动**（仍是用户自己那套）
+    assert st.load()["openai"]["model"] == "mine"
+    assert hyp.get(h.id) is not None
+
+    # 换成公开版（空 preset）
+    pub = types.ModuleType("models._beta_preset")
+    pub.PRESET = {}
+    pub.BUILD_CHANNEL = "public"
+    monkeypatch.setitem(sys.modules, "models._beta_preset", pub)
+    assert beta.enabled() is False
+    assert beta.is_active() is False, "公开版里不该还认 Beta 激活"
+
+    beta.apply_on_startup(st)
+    # 残留标记与备份都被清掉
+    assert not (tmp_path / "beta_state.json").exists()
+    assert not (tmp_path / "saved_config.json").exists()
+    # **配置与数据都没被动**
+    assert st.load()["openai"]["model"] == "mine"
+    assert hyp.get(h.id) is not None
+
+
 def test_uninstall_does_not_delete_appdata():
     """installer 配置：卸载**不得**删用户数据。
 
@@ -234,6 +308,18 @@ def test_uninstall_does_not_delete_appdata():
 
 
 # ---------------------------------------------------------------- Beta 回退
+
+@pytest.fixture
+def beta_dir(tmp_path, monkeypatch):
+    """把 beta 模块的 DATA_DIR 指向 tmp。
+
+    不加这个的话，unlock/disable 会把 beta_state.json 和
+    saved_config.json 写进**真实用户数据目录** —— 测试污染用户数据。
+    """
+    from core import beta
+    monkeypatch.setattr(beta, "DATA_DIR", tmp_path)
+    return tmp_path
+
 
 def test_beta_state_is_only_a_flag_not_a_data_gate(tmp_path):
     """**Beta 码绝不能成为数据生命周期的前置条件。**
@@ -320,7 +406,7 @@ def test_beta_preset_never_exposes_key(monkeypatch):
     assert "sk-SECRET" not in json.dumps(beta.state())
 
 
-def test_disable_restores_config_and_keeps_data(tmp_path):
+def test_disable_restores_config_and_keeps_data(tmp_path, beta_dir):
     """关闭 Beta → 还原模型配置，**数据一概不动**。"""
     from core.beta import disable, is_active, unlock
     from models.settings_store import ModelSettingsStore
@@ -364,7 +450,7 @@ def test_disable_restores_config_and_keeps_data(tmp_path):
     del sys.modules["models._beta_preset"]
 
 
-def test_wrong_code_does_not_touch_config(tmp_path):
+def test_wrong_code_does_not_touch_config(tmp_path, beta_dir):
     """码输错 → 配置与数据一概不动。"""
     import sys
     import types

@@ -153,6 +153,16 @@ def _read_state() -> dict:
 
 
 def is_active() -> bool:
+    """是否处于 Beta 体验状态。
+
+    **本包根本没有 Beta 能力时，恒为 False。**
+    理由：那台机器上装过一个 Beta 版、之后换成了公开版，`beta_state.json`
+    里的 active 标记会一直留着。此时若还认它，UI 会显示一个点了也没用的
+    入口，用户以为是自己操作坏了。而"回退到普通版"恰恰要求这里干净利落。
+    数据（聊天 / 记忆 / 理解）与这个标记**无关**，不会因为清它丢任何东西。
+    """
+    if not enabled():
+        return False
     return bool(_read_state().get("active"))
 
 
@@ -192,6 +202,14 @@ def _load_backup() -> dict | None:
 def _clear_backup() -> None:
     try:
         _backup_path().unlink()
+    except OSError:
+        pass
+
+
+def _drop_state() -> None:
+    """删掉 beta_state.json（只删这一个文件）。"""
+    try:
+        _state_path().unlink()
     except OSError:
         pass
 
@@ -262,11 +280,7 @@ def disable(store) -> tuple[bool, str]:
             log.warning("还原 Beta 前的配置失败：%s", exc)
             return False, "关闭失败，请稍后再试"
     _clear_backup()
-    p = _state_path()
-    try:
-        p.unlink()
-    except OSError:
-        pass
+    _drop_state()
     log.info("Beta 体验已关闭，模型配置已还原")
     return True, "已关闭 Beta 体验，模型设置已还原"
 
@@ -293,7 +307,35 @@ def apply_on_startup(store) -> None:
     """Core 启动时：Beta 活跃但配置被外部改过 → 重新套用预设。
 
     没有活跃的 Beta 状态就什么都不做（不碰用户自己的配置）。
+
+    **本包没有 Beta 能力时**（公开版）：把残留的 Beta 状态**干净回退**。
+    那台机器可能是"装过 Beta 版 → 换成公开版"，此时要做三件事：
+
+    1. 还原解锁前存下的配置 —— 否则用户永远停在 Beta 那套
+       （provider/base_url/model/api_key 全是 Beta 的），
+       公开版里 preset 没了，他既看不到也改不了这套配置。
+    2. 清掉激活标记 —— 否则 UI 显示一个点了也没用的 Beta 入口。
+    3. 清掉备份 —— 否则将来切回 Beta 会突然"还原"出他早就改掉的配置。
+
+    三件事都**只碰 model_settings.json 和 Beta 自己的两个小文件**，
+    绝不碰数据库：聊天 / 记忆 / 理解一律不动。
     """
+    if not enabled():
+        st = _read_state()
+        if st.get("active"):
+            log.info("本包不含 Beta 能力，回退 Beta 状态（不影响任何用户数据）")
+            backup = _load_backup()
+            if backup:
+                try:
+                    store.save(backup)   # 原样写回，不做校验
+                except Exception as exc:  # pragma: no cover - 磁盘异常
+                    log.warning("回退 Beta 前配置失败：%s", exc)
+            _clear_backup()
+            _drop_state()
+        else:
+            # 没激活过，但可能残留了半截备份文件
+            _clear_backup()
+        return
     if not is_active():
         return
     preset = load_preset()

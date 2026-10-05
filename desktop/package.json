@@ -1,7 +1,7 @@
 {
   "name": "personal-ai-desktop",
   "productName": "Personal AI",
-  "version": "0.6.0-beta.1",
+  "version": "0.6.0",
   "description": "Personal AI Core 桌面外壳——身体与入口（Core 是灵魂）",
   "private": true,
   "main": "main.js",

@@ -162,4 +162,5 @@ if ($xref) {
 }
 
 $sizeMB = [math]::Round((Get-ChildItem 'desktop\build\core' -Recurse | Measure-Object Length -Sum).Sum / 1MB, 1)
-Write-Host "OK: $exe（整体 $sizeMB MB，渠道 $($pyVersion -match 'beta'))"
+$channelName = if ($Beta) { 'Beta 渠道' } else { '公开渠道' }
+Write-Host "OK: $exe（整体 $sizeMB MB，$channelName）"
