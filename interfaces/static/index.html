@@ -1731,10 +1731,15 @@ function mdCollect() {
 function mdCollectLlama() {
   const sel = $('mdLcModel').value;
   const typed = $('mdLcModelPath').value.trim();
+  // 下拉优先于手填：用户改了下拉就是想换模型。
+  // ⚠️ 选中的那个要**同步回输入框**。原因：下拉里的选项是"找模型"
+  // 动态加的，刷新页面就没了；而输入框是"从配置恢复"的唯一来源。
+  // 不同步的话，保存一次之后点启动就会报"还没选模型文件"——
+  // 用户明明刚选过。**别删这句同步。**
+  if (sel) $('mdLcModelPath').value = sel;
   const lc = {
     base_url: $('mdLcUrl').value.trim(),
     exe: $('mdLcExe').value.trim(),
-    // 下拉优先于手填：用户改了下拉就是想换模型
     model_path: sel || typed,
   };
   const ctx = parseInt($('mdLcCtx').value, 10);

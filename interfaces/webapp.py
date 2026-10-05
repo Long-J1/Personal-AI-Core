@@ -293,7 +293,14 @@ def create_app(
 
     @app.post("/api/model/test")
     def test_model_settings(req: ModelSettingsRequest | None = None) -> dict:
-        """连接测试：可用保存前的临时配置测试，不落盘。"""
+        """连接测试：可用保存前的临时配置测试，不落盘。
+
+        **超时按 provider 给**，不能一刀切 8 秒。
+        本地 llama.cpp 跑 20B 模型时，光是"把 prompt 喂进去 + 出第一个字"
+        就要十几秒（实测 8~16 秒），8 秒必然超时 —— 用户看到的是
+        「❌ 调用失败：timed out」，而模型其实好好的。
+        云端仍然用短超时，因为那里慢就是真的有问题。
+        """
         try:
             cfg = model_settings_store.resolve(req.model_dump(exclude_none=True)) if req else model_settings_store.load()
             adapter = build_model(cfg, timeout=10.0)
@@ -301,6 +308,11 @@ def create_app(
             return {"ok": False, "detail": str(exc)}
         except ModelError as exc:
             return {"ok": False, "detail": str(exc)}
+        # 本地大模型的连接测试要给足时间（见 docstring）。
+        # 注意：这里改的是"测试"这条路径的超时，与服务状态探测
+        # （/api/status 里的 ping）无关——后者必须保持短，
+        # 它是健康探针，慢调用会拖垮首页。
+        test_timeout = 90.0 if cfg.get("provider") == "llamacpp" else 8.0
         # 优先用结构化判定（reachable / model_ok 分开），它才是模型可用性的
         # 唯一来源；没有就退回老的 test_connection 二元结果。
         checker = getattr(adapter, "check_service", None)
@@ -308,7 +320,7 @@ def create_app(
         if callable(checker):
             try:
                 t0 = time.perf_counter()
-                check = checker(timeout=8.0)
+                check = checker(timeout=test_timeout)
                 elapsed = round((time.perf_counter() - t0) * 1000)
             except Exception as exc:  # 连接测试绝不许把服务打崩
                 check = None
@@ -325,7 +337,7 @@ def create_app(
                 return {"ok": False, "detail": "该 Provider 不支持连接测试"}
             try:
                 t0 = time.perf_counter()
-                ok, detail = tester(timeout=8.0)
+                ok, detail = tester(timeout=test_timeout)
                 elapsed = round((time.perf_counter() - t0) * 1000)
             except Exception as exc:  # 连接测试绝不许把服务打崩
                 ok, detail, elapsed = False, f"测试失败：{exc}", None

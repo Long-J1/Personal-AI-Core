@@ -17,6 +17,7 @@ from interfaces import webapp as W
 from memory.store import MemoryStore
 from models.llamacpp_adapter import LlamaCppServer
 from models.mock_adapter import MockChatModel
+from models.openai_provider import OpenAICompatibleProvider
 from models.settings_store import ModelSettingsStore
 
 
@@ -352,9 +353,11 @@ def test_model_test_uses_llamacpp_adapter(client, monkeypatch):
     from models import llamacpp_adapter as lc
     monkeypatch.setattr(lc, "health", lambda *a, **k: {"n_ctx": 1})
     seen = []
+    timeouts = []
 
     def _post(payload, timeout=None):
         seen.append(payload)
+        timeouts.append(timeout)
         return {"choices": [{"message": {"role": "assistant",
                                          "content": "好",
                                          "reasoning_content": ""},
@@ -366,6 +369,37 @@ def test_model_test_uses_llamacpp_adapter(client, monkeypatch):
         "llamacpp": {"base_url": "http://127.0.0.1:8080"}}).json()
     assert d["provider"] == "llamacpp"
     assert d["ok"] is True
+    # **超时必须给足**。真机上抓到的 bug：一律 8 秒 → 本地 20B 模型
+    # 光是出第一个字就要 8~16 秒 → 用户看到「❌ 调用失败：timed out」，
+    # 而模型其实好好的。
+    assert timeouts and all(t and t >= 60 for t in timeouts), \
+        f"本地模型连接测试超时给得太短：{timeouts}"
+
+
+def test_cloud_model_test_keeps_short_timeout(client, monkeypatch):
+    """云端仍用短超时——那里慢就是真有问题，不能被本地那条带偏。
+
+    注意 openai provider 有 `check_service`，实际走的是那条分支，
+    所以这里断言它收到的超时，而不是 `test_connection` 的。
+    """
+    c, _ = client
+    timeouts = []
+
+    class _Watched(OpenAICompatibleProvider):
+        def check_service(self, timeout=8.0):
+            timeouts.append(timeout)
+            from models.base import ServiceCheck
+            return ServiceCheck(ok="ok", message="连接成功", reachable=True,
+                                model_ok=True)
+
+    monkeypatch.setattr(W, "build_model", lambda cfg, timeout=None: _Watched(
+        "http://x/v1", "m", "k", timeout or 8.0))
+    d = c.post("/api/model/test", json={
+        "provider": "openai",
+        "openai": {"base_url": "http://x/v1", "model": "m"}}).json()
+    assert d["provider"] == "openai"
+    assert timeouts and all(t <= 10 for t in timeouts), \
+        f"云端超时不该被本地那条带长：{timeouts}"
 
 
 def test_status_endpoint_still_works_with_llamacpp_provider(client):

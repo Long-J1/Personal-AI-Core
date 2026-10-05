@@ -58,9 +58,9 @@
 > 若只报这两项，刷新快照再提交一次即可。
 | **未推送** | **46 个 commit**（`ahead origin/master`） |
 | tag | `v0.2.0` `v0.3.0` `v0.4.0` `v0.5.0` |
-| `core/config.py` version | `0.6.0-beta.1` |
-| `desktop/package.json` version | `0.6.0-beta.1` |
-| 测试用例 | **883 常规 EXIT=0**（+2 个真模型 e2e 需云端） |
+| `core/config.py` version | `0.6.0` |
+| `desktop/package.json` version | `0.6.0` |
+| 测试用例 | **941 常规 EXIT=0**（+2 个真模型 e2e 需云端） |
 | 数据库表 | **15 张** / 5 个 store |
 | HTTP 端点 | **63 个路径**（含 4 个 llama.cpp：scan / status / start / stop；其中 7 个同时有 GET 和 PUT） |
 | 新增依赖 | 无（运行时仅 fastapi / pydantic / uvicorn / httpx / pillow + stdlib） |
@@ -75,9 +75,21 @@
 > ——V0.5.5 之后连续开发没做发版留下的，已在 0.6.0 预览版打包前修掉。
 > **这个 0.6.0-beta.1 仍然只在本地**：安装包已装到本机并复制了一份到桌面，
 > 没上传任何 Release，没改官网。
-> ⚠️ 这个构建**不含 Beta 体验码**（构建时未注入 `PAI_BETA_*`，
-> `models/_beta_preset.py` 没生成 → `--hidden-import` 没加 → 包里没有它）。
-> 接收方必须自己在「模型设置」配模型。
+> ⚠️ **0.6.0（2026-10-05，已装到本机 + 桌面）**：这是**普通公开版**，
+> 不含 Beta 一键配置（`build_core.ps1` 公开模式生成空 preset，
+> UI 入口自动隐藏）。Beta 版随时可出：
+>
+> ```powershell
+> $env:PAI_BETA_CODE='<体验码>'; $env:PAI_BETA_API_KEY='<Beta专用Key>'
+> powershell -File scripts/build_core.ps1 -Beta
+> ```
+>
+> `-Beta` 缺凭证会**直接中止构建**，不再产出"看着装了其实没功能"的包。
+> Beta 用的必须是**专用 Key**，不能拿开发者主 Key 打进安装包。
+>
+> 0.6.0 相对 0.6.0-beta.1 的实质变化：Understanding Stability 生命周期
+> （active / under_review / inactive）、llama.cpp 一键启动修三个真机 bug、
+> 升级前自动备份用户数据。
 
 ### 未提交的脏文件
 
@@ -669,7 +681,7 @@ Ollama 那条靠 `"think": false` 从源头关掉；llama.cpp 那条关不掉
 | **unit** | 多数 | 单个函数对不对（存储层数学、解析、投影） |
 | **integration** | `test_hypothesis_chain` / `test_first_run` / `test_pattern_flow` | 多个模块串起来通不通 |
 | **acceptance** | 6 个脚本 | 产品级验收（起服务、走 API、验 UI 存在） |
-| **mutation** | 5 个脚本 / **76 个变异** | **测试到底守没守住** |
+| **mutation** | 6 个脚本 / **89 个变异** | **测试到底守没守住** |
 | **replay / soak** | `soak_v0510.py` | 长时间连续跑会不会烂 |
 | **real-model** | `test_feedback_reale2e.py` | 真模型链路（需 `--deselect`，本机 Ollama 未跑） |
 
