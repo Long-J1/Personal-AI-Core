@@ -58,10 +58,20 @@ STATUSES = ("tentative", "confirmed", "rejected", "deleted")
 STATUS_LABELS = {
     "tentative": "待验证",
     "confirmed": "用户已确认",
+    "under_review": "待复审",
+    "inactive": "已不再成立",
     "rejected": "已否决",
     "deleted": "已删除",
 }
 LIVE_STATUSES = ("tentative", "confirmed")   # 进入 Prompt / UI 可见
+# Understanding Stability 的两个附加状态。刻意**不在** LIVE_STATUSES 里 ——
+# 所以它们天然不进 prompt / 「我眼中的你」的 live 查询，一处都不用改。
+# （和 V0.5.9 的 pending/accepted/expired 同一个手法。）
+UNDER_REVIEW = "under_review"                 # 复审中：没死，但不该当权威说
+INACTIVE = "inactive"                         # 已不再成立：历史保留
+# 本模块（understanding_stability）可以改写的全部状态。
+# 不含 rejected/deleted —— 那是用户的终局决定，稳定性不该碰。
+MANAGED_STATUSES = ("tentative", "confirmed", UNDER_REVIEW, INACTIVE)
 
 # ---------- 证据 ----------
 POLARITIES = ("support", "contradict")
@@ -89,7 +99,9 @@ CREATE TABLE IF NOT EXISTS hypotheses (
   created_at_iso TEXT NOT NULL,
   created_at_epoch REAL NOT NULL,
   updated_at_iso TEXT NOT NULL,
-  updated_at_epoch REAL NOT NULL
+  updated_at_epoch REAL NOT NULL,
+  status_detail TEXT NOT NULL DEFAULT '',
+  status_changed_epoch REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_hypo_status ON hypotheses(status, updated_at_epoch);
 
@@ -121,6 +133,30 @@ CREATE TABLE IF NOT EXISTS hypothesis_log (
 );
 CREATE INDEX IF NOT EXISTS idx_hl_hypo ON hypothesis_log(hypothesis_id, epoch);
 """
+
+# ---- Understanding Stability 的两列（新增，唯一真正的 schema migration）----
+# 为什么这两列不能靠 TEXT 复用绕过：
+#   status_detail          要放"2026-10-05 复审"这种给人看的话，log.detail
+#                          是 JSON，查询和脱敏都比单独一列麻烦。
+#   status_changed_epoch   复审期间"只数复审之后的证据"必须有起点时间戳，
+#                          否则历史上几百条反证会让 review 一进来就立刻失活。
+# 为什么它是安全的：
+#   · 幂等 —— 用 ADD COLUMN 的重复执行会报错，所以先查 pragma 再决定；
+#   · **不重建表、不删数据、不改任何既有列的值**；
+#   · 老库里没有这两列的行读出来就是 '' / 0.0，即"从未被复审过"，
+#     语义正确（历史理解不会因为升级就被误判为复审中）。
+_STABILITY_MIGRATION = (
+    ("status_detail", "TEXT NOT NULL DEFAULT ''"),
+    ("status_changed_epoch", "REAL NOT NULL DEFAULT 0"),
+)
+
+
+def _ensure_stability_columns(con: sqlite3.Connection) -> None:
+    """给老库补两列。**幂等，且不动任何既有数据。**"""
+    have = {r[1] for r in con.execute("PRAGMA table_info(hypotheses)").fetchall()}
+    for name, decl in _STABILITY_MIGRATION:
+        if name not in have:
+            con.execute(f"ALTER TABLE hypotheses ADD COLUMN {name} {decl}")
 
 
 def _now() -> datetime:
@@ -154,6 +190,10 @@ class Hypothesis:
         "id", "statement", "confidence", "status", "scope",
         "support_count", "contradict_count", "used_count",
         "asked_count", "last_asked_epoch", "pending_question",
+        # Understanding Stability：这两列加了就必须同步加进 __slots__,
+        # 否则 self.status_detail = ... 会抛 AttributeError（__slots__ 类
+        # 不允许动态属性）。这是本类加字段时最容易漏的一步。
+        "status_detail", "status_changed_epoch",
         "created_at", "updated_at",
     )
 
@@ -172,6 +212,8 @@ class Hypothesis:
         asked_count: int = 0,
         last_asked_epoch: float = 0.0,
         pending_question: str = "",
+        status_detail: str = "",
+        status_changed_epoch: float = 0.0,
     ):
         self.id = id
         self.statement = statement
@@ -184,6 +226,10 @@ class Hypothesis:
         self.asked_count = asked_count
         self.last_asked_epoch = last_asked_epoch
         self.pending_question = pending_question
+        # Understanding Stability：这两个默认值对老库同样正确
+        # （"" = 没有状态说明，0.0 = 从未被复审过）
+        self.status_detail = status_detail
+        self.status_changed_epoch = status_changed_epoch
         self.created_at = created_at
         self.updated_at = updated_at
 
@@ -227,6 +273,9 @@ class HypothesisStore:
                 if "pending_question" not in cols:
                     con.execute("ALTER TABLE hypotheses ADD COLUMN"
                                 " pending_question TEXT NOT NULL DEFAULT ''")
+                # Understanding Stability：同样原地补列，幂等
+                with con:
+                    _ensure_stability_columns(con)
             con.commit()
         log.info("Personal Hypotheses 就绪：%s", self.db_path)
 
@@ -293,6 +342,11 @@ class HypothesisStore:
                               if "last_asked_epoch" in keys else 0.0),
             pending_question=(row["pending_question"]
                               if "pending_question" in keys else ""),
+            # Stability：老库没这两列时读成 ""/0.0，语义正确
+            status_detail=(row["status_detail"]
+                           if "status_detail" in keys else ""),
+            status_changed_epoch=(row["status_changed_epoch"]
+                                  if "status_changed_epoch" in keys else 0.0),
             created_at=datetime.fromisoformat(row["created_at_iso"]),
             updated_at=datetime.fromisoformat(row["updated_at_iso"]),
         )

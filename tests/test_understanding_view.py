@@ -194,12 +194,18 @@ def test_assert_helper_actually_detects_leaks():
 
 
 def test_timeline_keys_are_all_product_facing():
-    """时间线每一项只应该有这几个键——多一个都可能是内部字段。"""
+    """时间线每一项只应该有这几个键——多一个都可能是内部字段。
+
+    `review_note` 是 Understanding Stability 加的：它装的是
+    "2026-10-05 复审" 这种人话，且过了 _safe_review_note 的禁词检查。
+    把它显式列进白名单，而不是把断言放宽 —— 放宽就失去意义了。
+    """
     tl = build_timeline([hypo(
         evidence=[{"polarity": "support", "excerpt": "晚上十点后学习效率最高",
                    "created_at_iso": "2026-10-01T20:00:00"}])], [])
     allowed = {"kind", "topic", "about", "state", "state_text",
-               "formed_on", "changed", "change_note", "quotes"}
+               "formed_on", "changed", "change_note", "review_note",
+               "quotes"}
     for item in tl["items"]:
         assert set(item) == allowed, f"意外的键：{set(item) - allowed}"
         assert set(item["quotes"][0]) == {"when", "text", "kind"}

@@ -766,6 +766,19 @@ class ConversationService:
                              len(syn["proposed"]))
             except Exception as exc:
                 log.warning("跨上下文合成失败（跳过，不影响对话）：%s", exc)
+            # 理解稳定性复审（Understanding Stability）
+            # 位置在所有候选产生之后：它只看**已经落库的正式理解 + 本轮
+            # 新证据**，候选不参与（candidate 也不许证明正式理解该变）。
+            # 它同样不参与本轮任何回答决策——只改状态，让下一轮生效。
+            try:
+                from .understanding_stability import StabilityBridge
+
+                stab = StabilityBridge(self.hyp)
+                reviewed = stab.review_all()
+                if reviewed:
+                    log.info("理解稳定性复审：%d 条状态变化", reviewed)
+            except Exception as exc:
+                log.warning("理解稳定性复审失败（跳过，不影响对话）：%s", exc)
             # B 路径
             try:
                 if is_pattern_declaration(message):

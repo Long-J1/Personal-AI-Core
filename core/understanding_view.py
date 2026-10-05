@@ -25,12 +25,14 @@ STATE_STABLE = "stable"       # 稳定理解
 STATE_LEARNING = "learning"   # 还在摸索
 STATE_CHANGED = "changed"     # 有过变化
 STATE_DROPPED = "dropped"     # 不再使用
+STATE_REVIEWING = "reviewing" # 待复审（Understanding Stability 新增）
 
 STATE_TEXT = {
     STATE_STABLE: "稳定理解",
     STATE_LEARNING: "还在摸索",
     STATE_CHANGED: "有过变化",
     STATE_DROPPED: "不再使用",
+    STATE_REVIEWING: "待复审",
 }
 
 # natural_bridge 标记失活时写进 status_reason 的固定前缀。
@@ -42,8 +44,15 @@ _CHANGE_REASON_PREFIX = "用户表示自己变了："
 _STATUS_MAP = {
     "tentative": STATE_LEARNING,
     "confirmed": STATE_STABLE,
+    # 待复审：不是"稳定"也不是"摸索"——它已经够格被质疑了。
+    # 归到 learning 会让用户以为系统还没反应过来；
+    # 归到 stable 是在撒谎（它已经不该被当权威结论说了）。
+    "under_review": STATE_REVIEWING,
     "rejected": STATE_DROPPED,
     "deleted": STATE_DROPPED,
+    # 已不再成立：和 rejected 一样不进「我眼中的你」的正式理解区，
+    # 但库里那一行还在，随时能查。
+    "inactive": STATE_DROPPED,
 }
 
 # 合成规则名 → 用户看得懂的主题名（毕业后的 inferred:synthesis:{rule}:{label}）
@@ -287,6 +296,10 @@ def build_understanding(hypo: dict, now: datetime | None = None) -> dict:
     changed = bool(note) or state == STATE_CHANGED
     if changed and state == STATE_LEARNING:
         state = STATE_CHANGED
+    # 复审说明（"2026-10-05 复审"）是人话且不含内部 id，可以显示。
+    # 但要过一遍泄漏自检 —— 万一将来有人往这个字段里塞 id，
+    # assert_no_internal_fields 会当场抓到而不是悄悄端给用户。
+    review_note = _safe_review_note(hypo.get("status_detail", ""))
     return {
         "kind": "understanding",
         "topic": topic,
@@ -296,9 +309,32 @@ def build_understanding(hypo: dict, now: datetime | None = None) -> dict:
         "formed_on": _when_of(hypo, now),
         "changed": changed,
         "change_note": note,
+        "review_note": review_note,
         "quotes": quotes,
         "_ts": _epoch(hypo.get("created_at_iso") or hypo.get("created_at")),
     }
+
+
+_REVIEW_NOTE_BANNED = ("confidence", "scope", "hypothesis_id", "source_id",
+                       "origin", "ctxday:", "correction:", "event:")
+
+
+def _safe_review_note(raw: str) -> str:
+    """status_detail 是给人看的，但仍然要过一遍禁词检查。
+
+    理由：这是**唯一**一个由数据库字段直接流向 UI 的新出口。
+    V0.5.7 就因为 `_change_note` 取不到人话时回退到 `log.detail`，
+    把 `{"source_type":"correction",...}` 原样显示给了用户。
+    这里宁可什么都不显示，也不冒那个险。
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    low = s.lower()
+    for bad in _REVIEW_NOTE_BANNED:
+        if bad in low:
+            return ""            # 宁可不给，也不给错的
+    return s[:60]
 
 
 def _when_of(obj, now: datetime | None = None) -> str:

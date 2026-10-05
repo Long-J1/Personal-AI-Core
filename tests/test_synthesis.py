@@ -509,10 +509,14 @@ def test_synthesis_prefix_guard_blocks_pattern_promotion():
     iso, ep = _iso(), _epoch()
 
     def _row(rid):
+        # 这两列是 Understanding Stability 加的。手写字典时必须同步补上，
+        # 否则 `row[c] for c in cols` 会 KeyError（cols 来自 PRAGMA，
+        # 会自动含新列）——一个看起来像产品 bug、其实是测试没跟上的错。
         return {"id": rid, "statement": h.statement, "confidence": 0.45,
                 "status": "confirmed", "scope": h.scope,
                 "support_count": 0, "contradict_count": 0, "used_count": 0,
                 "asked_count": 0, "last_asked_epoch": 0, "pending_question": "",
+                "status_detail": "", "status_changed_epoch": 0.0,
                 "created_at_iso": iso, "created_at_epoch": ep,
                 "updated_at_iso": iso, "updated_at_epoch": ep}
 
