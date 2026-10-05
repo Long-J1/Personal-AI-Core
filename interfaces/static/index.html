@@ -477,6 +477,12 @@ input:focus, select:focus { border-color: var(--teal); }
 .hint { font-size: 12.5px; color: var(--ink-faint); margin-top: 8px; }
 .hint.warn { color: var(--warn); }
 label.fld { font-size: 12.5px; color: var(--ink-soft); display: flex; gap: 8px; align-items: center; }
+/* llama.cpp 高级参数：默认收起。不用 details 就没法做到"默认不吓人但想得到"。 */
+.lc-advanced { margin-top: 10px; border-top: 1px solid var(--line, rgba(255,255,255,.09)); padding-top: 8px; }
+.lc-advanced > summary { cursor: pointer; font-size: 12.5px; color: var(--ink-faint); user-select: none; }
+.lc-advanced > summary:hover { color: var(--ink-soft); }
+.lc-advanced label.fld { flex-direction: column; align-items: flex-start; gap: 4px; }
+.lc-advanced label.fld > input { width: 100%; }
 video { width: 100%; max-height: 300px; border-radius: 12px; background: #000; margin-top: 10px; }
 .result { display: flex; gap: 12px; margin-top: 12px; }
 .result img { width: 120px; height: 88px; object-fit: cover; border-radius: 10px; background: var(--sea-deep); }
@@ -786,6 +792,7 @@ h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; 
         <label class="fld">Provider
           <select id="mdProvider">
             <option value="ollama">本地 Ollama</option>
+            <option value="llamacpp">本地 llama.cpp（GGUF · 可一键启动）</option>
             <option value="openai">云端 API（OpenAI-compatible）</option>
           </select>
         </label>
@@ -794,6 +801,61 @@ h2.ptitle small { font-weight: 400; color: var(--ink-faint); font-size: 11.5px; 
         <input id="mdOllamaUrl" type="text" placeholder="Ollama 地址">
         <input id="mdOllamaModel" type="text" placeholder="模型名">
       </div>
+
+      <div id="mdLlamaBox" style="margin-top:10px" hidden>
+        <div class="row">
+          <input id="mdLcUrl" type="text" placeholder="服务地址，例如 http://127.0.0.1:8080">
+          <button id="btnLcStatus" class="ghost">看状态</button>
+        </div>
+        <div class="hint" style="margin-top:6px">
+          如果你已经在别处跑着 llama-server，填上地址就够了。下面的部分让你不用开命令行。
+        </div>
+
+        <div class="row tools" style="margin-top:10px">
+          <input id="mdLcExe" type="text" placeholder="llama-server.exe 的位置" style="flex:1">
+          <button id="btnLcScanExe" class="ghost">找程序</button>
+        </div>
+        <div class="row tools" style="margin-top:6px">
+          <select id="mdLcModel" style="flex:1">
+            <option value="">— 选一个 .gguf 模型 —</option>
+          </select>
+          <button id="btnLcScanModels" class="ghost">找模型</button>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <input id="mdLcModelPath" type="text" placeholder="或直接填 .gguf 的完整路径" style="flex:1">
+        </div>
+
+        <details class="lc-advanced">
+          <summary>高级参数（一般不用动）</summary>
+          <div class="row" style="margin-top:8px">
+            <label class="fld">上下文
+              <input id="mdLcCtx" type="number" min="256" max="262144" step="256" placeholder="4096">
+            </label>
+            <label class="fld">并发
+              <input id="mdLcParallel" type="number" min="1" max="8" step="1" placeholder="1">
+            </label>
+          </div>
+          <div class="row" style="margin-top:6px">
+            <label class="fld" style="flex:1">显卡层数（留空 = 自动）
+              <input id="mdLcNgl" type="text" placeholder="留空最稳" inputmode="numeric">
+            </label>
+          </div>
+          <div class="hint" style="margin-top:6px">
+            <b>「显卡层数」留空就好。</b>填一个大的数（比如 99）在显存小的机器上会让程序
+            启动就失败。留空由 llama.cpp 自己分配，能塞多少塞多少。
+          </div>
+          <div class="row" style="margin-top:6px">
+            <input id="mdLcExtra" type="text" placeholder="额外参数（可选），例如 --no-warmup">
+          </div>
+        </details>
+
+        <div class="row tools" style="margin-top:10px">
+          <button id="btnLcStart">启动 llama-server</button>
+          <button id="btnLcStop" class="ghost">停止</button>
+        </div>
+        <div class="hint" id="mdLcHint" style="margin-top:6px" hidden></div>
+      </div>
+
       <div class="row" id="mdOpenaiBox" style="margin-top:10px" hidden>
         <input id="mdBaseUrl" type="text" placeholder="API Base URL">
         <input id="mdOpenaiModel" type="text" placeholder="模型名">
@@ -1599,11 +1661,16 @@ $('btnPause').addEventListener('click', async () => {
 });
 
 /* ---------- 模型设置（D009） ---------- */
-const MD_LABEL = { ollama: '本地 Ollama', openai: '云端 API' };
+const MD_LABEL = {
+  ollama: '本地 Ollama',
+  llamacpp: '本地 llama.cpp',
+  openai: '云端 API',
+};
 
 function mdToggle() {
   const p = $('mdProvider').value;
   $('mdOllamaBox').hidden = p !== 'ollama';
+  $('mdLlamaBox').hidden = p !== 'llamacpp';
   $('mdOpenaiBox').hidden = p !== 'openai';
 }
 
@@ -1620,10 +1687,24 @@ async function loadModelSettings() {
     $('mdApiKey').placeholder = s.openai.api_key_set
       ? `API Key（已保存 ${s.openai.api_key_masked}，留空不修改）`
       : 'API Key（首次填写）';
+    const lc = s.llamacpp || {};
+    $('mdLcUrl').value = lc.base_url || 'http://127.0.0.1:8080';
+    $('mdLcExe').value = lc.exe || '';
+    $('mdLcModelPath').value = lc.model_path || '';
+    $('mdLcCtx').value = lc.ctx || 4096;
+    $('mdLcParallel').value = lc.parallel || 1;
+    $('mdLcNgl').value = lc.ngl || '';
+    $('mdLcExtra').value = lc.extra_args || '';
+    if (lc.model_path) {
+      // 恢复下拉：已保存的模型要在列表里能看见
+      addLcModel(lc.model_path, false);
+      $('mdLcModel').value = lc.model_path;
+    }
     const cur = s.current || {};
     const label = MD_LABEL[cur.provider] || cur.provider || '未知';
     $('modelNow').textContent = '当前正在使用：' + label + (cur.model ? ' / ' + cur.model : '')
       + (cur.error ? '（' + cur.error + '）' : '');
+    lcRefreshStatus();
   } catch (e) {
     $('modelNow').textContent = '读取模型设置失败：' + e.message;
   }
@@ -1637,7 +1718,26 @@ function mdCollect() {
   };
   const key = $('mdApiKey').value.trim();
   if (key) body.openai.api_key = key;   // 不带 api_key 字段 = 不修改已保存的 Key
+  if (body.provider === 'llamacpp') body.llamacpp = mdCollectLlama();
   return body;
+}
+
+function mdCollectLlama() {
+  const sel = $('mdLcModel').value;
+  const typed = $('mdLcModelPath').value.trim();
+  const lc = {
+    base_url: $('mdLcUrl').value.trim(),
+    exe: $('mdLcExe').value.trim(),
+    // 下拉优先于手填：用户改了下拉就是想换模型
+    model_path: sel || typed,
+  };
+  const ctx = parseInt($('mdLcCtx').value, 10);
+  if (Number.isFinite(ctx)) lc.ctx = ctx;
+  const par = parseInt($('mdLcParallel').value, 10);
+  if (Number.isFinite(par)) lc.parallel = par;
+  lc.ngl = $('mdLcNgl').value.trim();          // 空 = 不传 -ngl
+  lc.extra_args = $('mdLcExtra').value.trim();
+  return lc;
 }
 
 function mdHint(text, bad) {
@@ -1674,6 +1774,121 @@ $('btnMdSave').addEventListener('click', async () => {
   } finally { busy(btn, false); }
 });
 
+/* ---------- 本地 llama.cpp：一键启动 ----------
+   三条约束都写在这段里：
+   · 「显卡层数」默认留空 —— 填大了在小显存卡上会让 llama-server 起不来
+   · 启动可能等一两分钟（大模型要加载权重），按钮必须有耐心文案
+   · 只停我们启动的进程：用户自己在命令行起的，状态里会标出来 */
+function lcHint(text, bad) {
+  const el = $('mdLcHint');
+  el.hidden = false;
+  el.textContent = (bad ? '❌ ' : (bad === undefined ? '' : '✅ ')) + text;
+  el.className = 'hint' + (bad ? ' warn' : '');
+}
+
+function addLcModel(path, selectIt) {
+  const sel = $('mdLcModel');
+  if ([...sel.options].some(o => o.value === path)) return;
+  const name = path.split(/[\\/]/).pop();
+  const opt = document.createElement('option');
+  opt.value = path;
+  opt.textContent = name;
+  sel.appendChild(opt);
+  if (selectIt) sel.value = path;
+}
+
+async function lcScanModels() {
+  const btn = $('btnLcScanModels');
+  busy(btn, true, '在找…');
+  try {
+    const r = await api('/api/llamacpp/scan');
+    const ms = (r.models || []);
+    for (const m of ms) addLcModel(m.path, false);
+    if (ms.length) {
+      if (!$('mdLcModel').value) $('mdLcModel').selectedIndex = 1;
+      lcHint(`找到 ${ms.length} 个模型文件，已放进上面的下拉框。`, false);
+    } else {
+      lcHint('没扫到 .gguf 文件。模型可能装在别的盘，或者还在下载——'
+        + '可以直接把完整路径贴到下面的输入框。', true);
+    }
+    if (r.exe_found && !$('mdLcExe').value) $('mdLcExe').value = r.exe;
+  } catch (e) {
+    lcHint('扫描失败：' + e.message, true);
+  } finally { busy(btn, false); }
+}
+
+async function lcScanExe() {
+  const btn = $('btnLcScanExe');
+  busy(btn, true, '在找…');
+  try {
+    const r = await api('/api/llamacpp/scan');
+    if (r.exe_found) {
+      $('mdLcExe').value = r.exe;
+      lcHint('找到了 llama-server.exe。', false);
+    } else {
+      lcHint('没找到 llama-server.exe。请自己把它的完整路径贴进上面的输入框。', true);
+    }
+  } catch (e) {
+    lcHint('扫描失败：' + e.message, true);
+  } finally { busy(btn, false); }
+}
+
+async function lcRefreshStatus() {
+  const el = $('mdLcHint');
+  if (!el || $('mdLlamaBox').hidden) return;
+  try {
+    const s = await api('/api/llamacpp/status');
+    if (!s.running) {
+      el.hidden = false;
+      el.className = 'hint';
+      el.textContent = 'llama-server 没在跑。';
+      return;
+    }
+    const who = s.managed && s.ours ? '（由 App 启动）' : '（不是 App 启动的，可能是你自己开的）';
+    const m = (s.models && s.models[0]) || s.model || '';
+    el.hidden = false;
+    el.className = 'hint';
+    el.textContent = 'llama-server 在跑 ' + who
+      + (m ? '：' + m.split(/[\\/]/).pop() : '');
+    $('btnLcStop').disabled = !(s.managed && s.ours);
+    $('btnLcStop').title = $('btnLcStop').disabled
+      ? '这是你自己启动的进程，App 不会去关它' : '';
+  } catch (e) { /* 状态查不到就安静，别刷错误 */ }
+}
+
+$('btnLcScanModels').addEventListener('click', lcScanModels);
+$('btnLcScanExe').addEventListener('click', lcScanExe);
+$('btnLcStatus').addEventListener('click', lcRefreshStatus);
+
+$('btnLcStart').addEventListener('click', async () => {
+  const btn = $('btnLcStart');
+  busy(btn, true, '启动中，可能要一两分钟…');
+  lcHint('正在启动 llama-server。第一次加载大模型要几十秒到几分钟，请先别关窗口。');
+  try {
+    const r = await api('/api/llamacpp/start', {
+      method: 'POST', body: JSON.stringify(mdCollectLlama()),
+    });
+    if (!r.ok) { lcHint(r.error || '启动失败', true); return; }
+    lcHint(r.reused
+      ? '检测到已经有一个能用的 llama-server，直接连上了（没有重复启动）。'
+      : '启动好了，现在可以用本地模型聊天了。', false);
+    await lcRefreshStatus();
+  } catch (e) {
+    lcHint(e.message, true);
+  } finally { busy(btn, false); }
+});
+
+$('btnLcStop').addEventListener('click', async () => {
+  const btn = $('btnLcStop');
+  busy(btn, true, '停止中…');
+  try {
+    const r = await api('/api/llamacpp/stop', { method: 'POST' });
+    lcHint(r.detail || (r.ok ? '已停止' : '停止失败'), !r.ok);
+    await lcRefreshStatus();
+  } catch (e) {
+    lcHint(e.message, true);
+  } finally { busy(btn, false); }
+});
 /* ---------- 数据与备份（阶段2） ---------- */
 function dataHint(text, bad) {
   const el = $('dataHint');

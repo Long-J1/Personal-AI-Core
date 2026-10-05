@@ -11,6 +11,7 @@ import logging
 from core.config import settings as app_settings
 
 from .base import BaseModelAdapter, ModelUnavailableError
+from .llamacpp_adapter import LlamaCppAdapter
 from .ollama_adapter import OllamaAdapter
 from .openai_provider import OpenAICompatibleProvider
 from .settings_store import ModelSettingsStore, default_store
@@ -31,6 +32,16 @@ def build_model(cfg: dict, *, timeout: float | None = None) -> BaseModelAdapter:
         if not model:
             raise ModelUnavailableError("云端 API 未配置模型名")
         return OpenAICompatibleProvider(base, model, o.get("api_key", ""), t)
+    if provider == "llamacpp":
+        c = cfg.get("llamacpp", {})
+        base = (c.get("base_url") or "").strip()
+        if not base:
+            raise ModelUnavailableError("llama.cpp 未配置服务地址")
+        # 本地模型冷启动慢（首次加载权重几十秒起），默认给足超时。
+        # 不能用 understand_timeout：那是给"理解"这类小请求的。
+        return LlamaCppAdapter(base, (c.get("model") or "").strip(),
+                               c.get("api_key", ""),
+                               t if (t and t > 120) else 180.0)
     o = cfg.get("ollama", {})
     url = (o.get("url") or "").strip() or app_settings.ollama_url
     model = (o.get("model") or "").strip() or app_settings.model

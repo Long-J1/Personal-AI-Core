@@ -1,7 +1,7 @@
 """模型设置存储：Provider 配置放在数据目录，不进源码、不进 git（D009）。
 
 设计原则：
-- Core 不硬编码任何一家模型供应商，只认 provider 名（ollama / openai）
+- Core 不硬编码任何一家模型供应商，只认 provider 名（ollama / openai / llamacpp）
 - API Key 只落在数据目录的 model_settings.json，任何对外 API 返回前都经 public_view 脱敏
 - 换 Provider 只是换"推理引擎"，本文件与 Personal Context / 事件数据完全无关
 """
@@ -16,11 +16,17 @@ from core import config
 
 log = logging.getLogger("models.settings")
 
-PROVIDERS = ("ollama", "openai")
+PROVIDERS = ("ollama", "openai", "llamacpp")
+
+# llama.cpp 段有整数字段（port/ctx），和另两段的纯字符串结构不同，
+# 所以单独声明字段类型而不是塞进下面那个通用循环。
+_LLAMACPP_STR_FIELDS = ("base_url", "model", "api_key", "exe", "model_path",
+                        "ngl", "extra_args")
+_LLAMACPP_INT_FIELDS = ("port", "ctx", "parallel")
 
 
 def default_config() -> dict:
-    """默认配置：Ollama 本地（可用环境变量覆盖），云端 API 留空待用户填写。"""
+    """默认配置：Ollama 本地（可用环境变量覆盖），云端 / llama.cpp 留空待用户填写。"""
     return {
         "provider": "ollama",
         "ollama": {
@@ -28,7 +34,40 @@ def default_config() -> dict:
             "model": config.settings.model,
         },
         "openai": {"base_url": "", "model": "", "api_key": ""},
+        "llamacpp": {
+            "base_url": "http://127.0.0.1:8080",
+            # llama-server 只服务已加载的那一个模型，model 名不参与路由；
+            # 留空即可，填了也不碍事。
+            "model": "",
+            "api_key": "",
+            # 一键启动需要的三件东西。用户不填也能用（自己起 llama-server）。
+            "exe": "",
+            "model_path": "",
+            "port": 8080,
+            "ctx": 4096,
+            "parallel": 1,
+            # ngl 留空 = 不传 -ngl，让 llama.cpp 自己按显存分配。
+            # 传 99 会在小显存卡上直接 OOM 启动失败（见 llamacpp_adapter 模块说明）。
+            "ngl": "",
+            "extra_args": "",
+        },
     }
+
+
+def _apply_llamacpp(target: dict, vals: dict) -> None:
+    """把 llamacpp 段的值合进 target，**按字段类型**取，类型不对就保留默认。"""
+    for k in _LLAMACPP_STR_FIELDS:
+        if k in vals and isinstance(vals[k], str):
+            target[k] = vals[k]
+    for k in _LLAMACPP_INT_FIELDS:
+        v = vals.get(k)
+        # bool 是 int 的子类，得排除——否则 true 会被当成 1 端口
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, int):
+            target[k] = v
+        elif isinstance(v, str) and v.strip().lstrip("-").isdigit():
+            target[k] = int(v.strip())
 
 
 def mask_key(key: str) -> str:
@@ -42,6 +81,7 @@ def mask_key(key: str) -> str:
 
 def public_view(cfg: dict) -> dict:
     """对外（UI/API）可见的配置视图：永不含明文 API Key。"""
+    lc = cfg.get("llamacpp", {})
     return {
         "provider": cfg.get("provider", "ollama"),
         "ollama": {
@@ -53,6 +93,19 @@ def public_view(cfg: dict) -> dict:
             "model": cfg.get("openai", {}).get("model", ""),
             "api_key_set": bool(cfg.get("openai", {}).get("api_key")),
             "api_key_masked": mask_key(cfg.get("openai", {}).get("api_key", "")),
+        },
+        "llamacpp": {
+            "base_url": lc.get("base_url", ""),
+            "model": lc.get("model", ""),
+            "api_key_set": bool(lc.get("api_key")),
+            "api_key_masked": mask_key(lc.get("api_key", "")),
+            "exe": lc.get("exe", ""),
+            "model_path": lc.get("model_path", ""),
+            "port": lc.get("port", 8080),
+            "ctx": lc.get("ctx", 4096),
+            "parallel": lc.get("parallel", 1),
+            "ngl": lc.get("ngl", ""),
+            "extra_args": lc.get("extra_args", ""),
         },
     }
 
@@ -83,6 +136,9 @@ class ModelSettingsStore:
                 for k, v in vals.items():
                     if k in cfg[sect] and isinstance(v, str):
                         cfg[sect][k] = v
+        lc = raw.get("llamacpp")
+        if isinstance(lc, dict):
+            _apply_llamacpp(cfg["llamacpp"], lc)
         return cfg
 
     # ---------- 合并（不落盘） ----------
@@ -104,14 +160,26 @@ class ModelSettingsStore:
                     # api_key: None=不修改（patch 里不出现），""=清除
                     if k in cfg[sect] and isinstance(v, str):
                         cfg[sect][k] = v
+        lc = patch.get("llamacpp")
+        if isinstance(lc, dict):
+            _apply_llamacpp(cfg["llamacpp"], lc)
         return self._validate(cfg)
 
     def _validate(self, cfg: dict) -> dict:
-        if cfg["provider"] == "openai":
+        provider = cfg["provider"]
+        if provider == "openai":
             if not cfg["openai"]["base_url"].strip():
                 raise ValueError("云端 API 需要填写 Base URL")
             if not cfg["openai"]["model"].strip():
                 raise ValueError("云端 API 需要填写模型名")
+        elif provider == "llamacpp":
+            # 只有 base_url 是硬要求。exe / model_path 缺了照样能用——
+            # 用户可以自己在别处起 llama-server，我们只负责连。
+            if not cfg["llamacpp"]["base_url"].strip():
+                raise ValueError("llama.cpp 需要填写服务地址")
+            ctx = cfg["llamacpp"]["ctx"]
+            if not (256 <= int(ctx) <= 262144):
+                raise ValueError("上下文长度需要在 256 ~ 262144 之间")
         else:
             if not cfg["ollama"]["url"].strip():
                 raise ValueError("Ollama 地址不能为空")

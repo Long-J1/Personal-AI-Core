@@ -89,10 +89,26 @@ class OpenAICfg(BaseModel):
     api_key: str | None = None   # None=不修改；""=清除
 
 
+class LlamaCppCfg(BaseModel):
+    base_url: str | None = None
+    model: str | None = None
+    api_key: str | None = None   # None=不修改；""=清除
+    # 一键启动用。用户不填也能连（自己在别处起 llama-server）。
+    exe: str | None = None
+    model_path: str | None = None
+    port: int | None = None
+    ctx: int | None = None
+    parallel: int | None = None
+    # ngl: None=不修改；""=清空=不传 -ngl（让 llama.cpp 自动适配显存）
+    ngl: str | None = None
+    extra_args: str | None = None
+
+
 class ModelSettingsRequest(BaseModel):
-    provider: str | None = None          # ollama | openai
+    provider: str | None = None          # ollama | openai | llamacpp
     ollama: OllamaCfg | None = None
     openai: OpenAICfg | None = None
+    llamacpp: LlamaCppCfg | None = None
 
 
 class BetaUnlockRequest(BaseModel):
@@ -174,6 +190,10 @@ def create_app(
     app = FastAPI(title="Personal AI Core", version=settings.version)
     # 暴露给 app.state：诊断 / 测试要看"这台 app 正在跑的那个 conversation"
     app.state.conversation = conversation
+    # 我们启动过的 llama-server，按 base_url 索引。**只装我们自己起的**——
+    # 用户在命令行里跑的不进这里，stop 也就永远碰不到它们。
+    # 挂 app.state 而不是局部变量：不然测试和调试都够不着，也容易误加成全局。
+    app.state.llamacpp_managed = {}
 
     # V0.5.9：用户停止操作后，本地做一次后台整理。
     # 只在真实运行时启动（默认关，测试与脚本不受影响）。
@@ -324,6 +344,126 @@ def create_app(
                 "service_reachable": getattr(check, "reachable", None),
                 "service_model_ok": getattr(check, "model_ok", None),
                 "service_healthy": healthy}
+
+    # ---------- 本地 llama.cpp：扫盘 + 一键启动 ----------
+    # 只做三件事：帮忙找到 llama-server.exe / *.gguf，按填的参数把服务拉起来，
+    # 以及查状态。不参与推理、不改任何用户数据。
+
+    @app.get("/api/llamacpp/scan")
+    def llamacpp_scan() -> dict:
+        """扫本机的 llama-server.exe 和可用 gguf。
+
+        扫不到就如实说扫不到，让用户手填——绝不猜一个路径上去。
+        """
+        from models import llamacpp_adapter as lc
+        try:
+            found_exe = lc.find_exe()
+            found_models = lc.find_gguf()
+        except Exception as exc:                      # 扫盘永远不该掀翻服务
+            log.warning("llama.cpp 扫盘失败：%s", exc)
+            return {"ok": False, "error": f"扫描失败：{exc}",
+                    "exe": "", "models": []}
+        return {"ok": True,
+                "exe": found_exe,
+                "exe_found": bool(found_exe),
+                "models": found_models}
+
+    def _llamacpp_manager(patch: dict | None = None):
+        """按配置造一个启动器。
+
+        `patch` 给了就用它（允许"填完直接点启动，不先保存"），
+        但**一律不落盘**——没点保存就没改配置。
+        """
+        from models.llamacpp_adapter import LlamaCppServer
+        cfg = (model_settings_store.resolve(patch) if patch
+               else model_settings_store.load())
+        c = cfg.get("llamacpp", {})
+        ngl_raw = (c.get("ngl") or "").strip()
+        try:
+            ngl = int(ngl_raw) if ngl_raw else None
+        except ValueError:
+            ngl = None
+        return LlamaCppServer(
+            exe=c.get("exe", ""), model=c.get("model_path", ""),
+            port=int(c.get("port") or 8080), ctx=int(c.get("ctx") or 4096),
+            ngl=ngl, parallel=int(c.get("parallel") or 1),
+            extra_args=c.get("extra_args", ""),
+            base_url=c.get("base_url", ""))
+
+    @app.get("/api/llamacpp/status")
+    def llamacpp_status() -> dict:
+        """服务是否在跑。注意**区分是不是我们起的**——用户自己起的不能动。"""
+        try:
+            cfg = model_settings_store.load()
+            base = ((cfg.get("llamacpp") or {}).get("base_url") or ""
+                    ).strip() or "http://127.0.0.1:8080"
+            managed = app.state.llamacpp_managed.get(base)
+            if managed is None:
+                # 没经过我们启动 → 只探不动。
+                from models.llamacpp_adapter import LlamaCppServer
+                return {"ok": True, "managed": False,
+                        **LlamaCppServer(base_url=base).status()}
+            return {"ok": True, "managed": True, **managed.status()}
+        except Exception as exc:                      # 状态查询绝不许把服务打崩
+            return {"ok": False, "error": str(exc)}
+
+    @app.post("/api/llamacpp/start")
+    def llamacpp_start(req: LlamaCppCfg | None = None) -> dict:
+        """一键启动。等模型加载完（大模型可能几十秒到几分钟），返回真实结果。"""
+        patch = None
+        if req is not None:
+            dumped = req.model_dump(exclude_none=True)
+            if dumped:
+                patch = {"provider": "llamacpp", "llamacpp": dumped}
+        try:
+            srv = _llamacpp_manager(patch)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
+        if not srv.exe:
+            return {"ok": False, "error": "还没填 llama-server.exe 的位置。"
+                                          "可以先点「自动查找」让 App 扫一下。"}
+        if not srv.model:
+            return {"ok": False, "error": "还没选模型文件（.gguf）。"}
+
+        app.state.llamacpp_managed[srv.base_url] = srv
+        try:
+            res = srv.start()
+        except Exception as exc:                      # 启动绝不许把服务打崩
+            return {"ok": False, "error": f"启动失败：{exc}"}
+        if res.get("ok"):
+            # 起来了就把服务状态清掉——下次真实调用重新测，避免旧缓存说谎。
+            service_state.reset(detail="llama.cpp 刚启动，等待下一次真实调用")
+        return res
+
+    @app.post("/api/llamacpp/stop")
+    def llamacpp_stop() -> dict:
+        """只停我们自己起的进程。外部起的（用户命令行里跑的）一律不动。"""
+        try:
+            for base in list(app.state.llamacpp_managed.keys()):
+                srv = app.state.llamacpp_managed[base]
+                if not srv.ours:
+                    continue
+                res = srv.stop()
+                app.state.llamacpp_managed.pop(base, None)
+                if not res.get("ok"):
+                    return res
+            return {"ok": True,
+                    "detail": "没有由 App 启动的 llama-server"
+                              "（你在别处起的我不关）"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @app.on_event("shutdown")
+    async def _shutdown_llamacpp():
+        """App 退出时收掉我们起的 llama-server。"""
+        for srv in list(app.state.llamacpp_managed.values()):
+            try:
+                if srv.ours:
+                    srv.stop()
+            except Exception as exc:              # 永不掀翻退出
+                log.warning("停止 llama-server 失败（忽略）：%s", exc)
+        app.state.llamacpp_managed.clear()
 
     @app.on_event("startup")
     async def _startup():
