@@ -130,9 +130,8 @@ def test_stop_kills_only_our_own(client, monkeypatch):
     stopped = []
 
     class _Fake(LlamaCppServer):
-        def __init__(self):
-            super().__init__(base_url="http://127.0.0.1:8080")
-            self.ours = True
+        def alive(self):
+            return True          # ours 由 alive() 推出来，不用赋值
 
         def stop(self):
             stopped.append(1)
@@ -213,6 +212,84 @@ def test_start_rejects_bad_ctx_before_touching_process(client):
     d = c.post("/api/llamacpp/start", json={"ctx": 5}).json()
     assert d["ok"] is False
     assert "上下文" in d["error"]
+
+
+def test_start_twice_keeps_identity_and_pid(client, monkeypatch, tmp_path):
+    """连点两次启动：**必须还是同一个进程**。
+
+    真机上抓到过这个 bug：第二次点启动会用一个全新的空壳 server
+    覆盖掉旧的，于是 `ours` 从 true 变成 false —— 从此分不清
+    "App 起的"和"你自己起的"，而这条正是"绝不关掉用户进程"的依据。
+    """
+    c, _ = client
+    from models import llamacpp_adapter as lc
+    exe = tmp_path / "llama-server.exe"
+    exe.write_bytes(b"MZ")
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"x")
+    ModelSettingsStore(tmp_path / "ms.json").update({
+        "provider": "llamacpp",
+        "llamacpp": {"base_url": "http://127.0.0.1:8080",
+                     "exe": str(exe), "model_path": str(gguf)}})
+
+    # 真起一个 sleep 进程当"我们上次启动的服务"。
+    # 不能只 mock alive()：真 start() 里有 `if self.alive(): return "进程已在运行"`，
+    # mock 出来的 alive=True 会走到那条分支，测不到"复用"这条路径。
+    import subprocess as sp
+    import sys as _sys
+    real = sp.Popen([_sys.executable, "-c", "import time; time.sleep(120)"],
+                    stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+    kept = LlamaCppServer(base_url="http://127.0.0.1:8080")
+    kept.proc = real          # 攥着句柄 → ours 就是 True
+    c.app.state.llamacpp_managed["http://127.0.0.1:8080"] = kept
+
+    def _explode(*a, **k):
+        raise AssertionError("已有健康服务，不该再起一个")
+
+    monkeypatch.setattr(lc.subprocess, "Popen", _explode)
+    monkeypatch.setattr(lc, "health", lambda *a, **k: {"n_ctx": 4096})
+    monkeypatch.setattr(lc, "server_models", lambda *a, **k: ["m"])
+
+    r = c.post("/api/llamacpp/start", json={})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["ok"] is True
+    assert d.get("reused") is True
+    # 登记表里必须还是原来那个对象
+    assert c.app.state.llamacpp_managed["http://127.0.0.1:8080"] is kept
+    assert d.get("ours") is True, "我们启动的服务不能被降级成『不是 App 启动的』"
+    assert d.get("pid") == real.pid
+    try:
+        real.kill()
+    except OSError:
+        pass
+
+
+def test_start_replaces_dead_record(client, monkeypatch, tmp_path):
+    """登记的进程已经死了 → 要换成新的（否则永远起不来）。"""
+    c, _ = client
+    from models import llamacpp_adapter as lc
+    exe = tmp_path / "llama-server.exe"
+    exe.write_bytes(b"MZ")
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"x")
+    ModelSettingsStore(tmp_path / "ms.json").update({
+        "provider": "llamacpp",
+        "llamacpp": {"base_url": "http://127.0.0.1:8080",
+                     "exe": str(exe), "model_path": str(gguf)}})
+
+    class _Dead(LlamaCppServer):
+        def alive(self):
+            return False
+
+    c.app.state.llamacpp_managed["http://127.0.0.1:8080"] = _Dead()
+    # ours 现在是由 alive() 推出来的只读属性，_Dead.alive()=False → ours=False
+    assert c.app.state.llamacpp_managed["http://127.0.0.1:8080"].ours is False
+    monkeypatch.setattr(lc, "health", lambda *a, **k: {"n_ctx": 1})
+    monkeypatch.setattr(lc, "server_models", lambda *a, **k: [])
+    d = c.post("/api/llamacpp/start", json={}).json()
+    assert d["ok"] is True
+    assert c.app.state.llamacpp_managed["http://127.0.0.1:8080"] is not None
 
 
 def test_start_failure_does_not_500(client, monkeypatch, tmp_path):

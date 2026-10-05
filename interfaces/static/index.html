@@ -470,6 +470,12 @@ input[type=text], input:not([type]), input[type=password], input[type=url], sele
   border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; font-size: 13.5px; background: rgba(255,255,255,.8); color: var(--ink); outline: none;
 }
 input:focus, select:focus { border-color: var(--teal); }
+/* [hidden] 必须真的隐藏。
+   作者样式（.row{display:flex} 之类）优先级高于 UA 的 [hidden]{display:none}，
+   所以只要元素带 display 类，hidden 就完全失效——面板会同时显示三家 provider
+   的输入框，切换形同虚设。实测中招：mdOllamaBox / mdOpenaiBox / observeResult /
+   betaState / betaState2。 */
+[hidden] { display: none !important; }
 .row { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; }
 /* flex 子项默认 min-width:auto，长输入会把行撑宽 —— 一律允许收缩到 0 */
 .row > input, .row > select, .row > button { min-width: 0; }
@@ -1805,8 +1811,15 @@ async function lcScanModels() {
     const ms = (r.models || []);
     for (const m of ms) addLcModel(m.path, false);
     if (ms.length) {
-      if (!$('mdLcModel').value) $('mdLcModel').selectedIndex = 1;
-      lcHint(`找到 ${ms.length} 个模型文件，已放进上面的下拉框。`, false);
+      if (!$('mdLcModel').value) {
+        // 别默认选最大的那个：列表按体积降序，第一个往往是大到跑不动的。
+        // 取"装得进显存的最小那个"当默认——反正是默认值，用户可以改。
+        const fits = ms.filter(m => m.size_gb <= 14);
+        const pick = (fits.length ? fits[fits.length - 1] : ms[ms.length - 1]);
+        $('mdLcModel').value = pick.path;
+      }
+      lcHint(`找到 ${ms.length} 个模型文件，已放进上面的下拉框`
+        + `（已选中最小的那个，大的可能跑不动——你可以改）。`, false);
     } else {
       lcHint('没扫到 .gguf 文件。模型可能装在别的盘，或者还在下载——'
         + '可以直接把完整路径贴到下面的输入框。', true);

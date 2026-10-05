@@ -426,7 +426,16 @@ def create_app(
         if not srv.model:
             return {"ok": False, "error": "还没选模型文件（.gguf）。"}
 
-        app.state.llamacpp_managed[srv.base_url] = srv
+        # 已在同一个地址上跑着我们自己起的服务 → **沿用那个对象**。
+        # 换成新的会把 proc 句柄丢掉，之后 ours 永远变 False，
+        # 于是「App 起的」和「你自己起的」再也分不开，
+        # 而这条铁律正是"绝不关掉用户的进程"的唯一依据。
+        # 真要换模型/换参数时旧的进程还活着，那是用户自己点停止的事。
+        existing = app.state.llamacpp_managed.get(srv.base_url)
+        if existing is not None and existing.ours and existing.alive():
+            srv = existing
+        else:
+            app.state.llamacpp_managed[srv.base_url] = srv
         try:
             res = srv.start()
         except Exception as exc:                      # 启动绝不许把服务打崩

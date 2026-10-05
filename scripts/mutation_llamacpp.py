@@ -163,6 +163,21 @@ MUTATIONS = [
      '                model_settings_store.save('
      'model_settings_store.resolve(patch))'),
 
+    # ---------- 七、真机上抓到的：身份被空壳覆盖 ----------
+    ("T", "连点两次启动会换掉旧对象（ours 变 False，分不清谁的进程）",
+     WEBAPP,
+     "        existing = app.state.llamacpp_managed.get(srv.base_url)\n"
+     "        if existing is not None and existing.ours and existing.alive():\n"
+     "            srv = existing\n"
+     "        else:\n"
+     "            app.state.llamacpp_managed[srv.base_url] = srv",
+     "        app.state.llamacpp_managed[srv.base_url] = srv"),
+
+    ("U", "ours 不再跟着句柄走（停掉之后还自称『App 启动的』）",
+     ADAPTER,
+     "        return self.alive()\n\n    def status(self) -> dict:",
+     "        return True\n\n    def status(self) -> dict:"),
+
     ("S", "启动参数非法也照样起进程（该拦的不拦）",
      SETTINGS,
      "            if not (256 <= int(ctx) <= 262144):\n"

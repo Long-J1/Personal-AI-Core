@@ -151,12 +151,23 @@ class LlamaCppServer:
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
+    @property
+    def ours(self) -> bool:
+        """这个服务是不是**我们**启动的。
+
+        做成只读属性而不是在 status() 里临时算：调用方（webapp 的
+        stop 端点、start 的复用判断）直接问它，语义只有一个出处。
+        判据是"我们还攥着这个进程的句柄"——`stop()` 会把句柄清掉，
+        所以停掉之后自然变成 False，不会残留一个假的"我们启动的"。
+        """
+        return self.alive()
+
     def status(self) -> dict:
         """给 UI 的状态。区分"我们起的"和"外面已经有的"。"""
         props = health(self.base_url)
         return {
             "running": props is not None,
-            "ours": self.alive(),
+            "ours": self.ours,
             "pid": self.proc.pid if self.alive() else None,
             "base_url": self.base_url,
             "model": self.model,

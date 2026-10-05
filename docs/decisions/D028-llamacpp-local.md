@@ -122,6 +122,44 @@ llama.cpp 的 `/health` 只要 HTTP 服务活着就返回 ok，即使权重还�
 
 另一条存活（Q）是我的断言太松：`understand_timeout` 默认就是 180，所以只断 `>= 120` 的话，变异成原样透传 `t` 一样能过。改成**显式传 `timeout=5.0`** 再断底线。
 
+## 顺带修掉的一个既有 bug：`[hidden]` 完全失效
+
+做这个功能时发现模型面板里 **三家的输入框一直同时显示**——切 Provider 形同虚设。
+
+根因不是 JS 写错了，是 CSS：作者样式 `.row { display: flex }` 的优先级**高于 UA 样式表**里的 `[hidden] { display: none }`。只要元素带 `display` 类，`hidden` 属性就完全不生效。
+
+实测中招的 5 处（**全是既有代码，不是本次引入**）：
+
+| 元素 | 后果 |
+|---|---|
+| `mdOllamaBox` | Ollama 的地址/模型名跟别的家一起显示 |
+| `mdOpenaiBox` | 云端的 Base URL / Key 一起显示 |
+| `observeResult` | 观察结果容器空占位 |
+| `betaState` / `betaState2` | Beta 状态徽章空占位 |
+
+修法是一条全局规则：`[hidden] { display: none !important; }`。
+
+**教训**：JS 里 `el.hidden = true` 是**看起来**在做事。用 `getComputedStyle(el).display` 验一遍才算数。这个坑在没有布局的单元测试里永远抓不到——**DOM 层的事必须去 DOM 层验**。
+
+## 真机抓到的第二个 bug：连点两次启动会丢掉进程身份
+
+第一次真机点「启动」成功了（17 秒，PID 20668，`ours=true`）。接着又点一次「停止」，再点「启动」——服务确实还活着，但状态变成：
+
+```
+pid: 20668 → null
+ours: true → false
+```
+
+原因：`/api/llamacpp/start` 每次都用**新的** `LlamaCppServer` 覆盖 `app.state` 里的旧对象。新对象没有 `proc` 句柄，于是 `ours` 永远是 False。
+
+**这比看起来严重**：`ours=False` 意味着"我们分不清这个服务是谁起的"——而这条正是「绝不关掉用户的进程」那条铁律的唯一依据。一旦失效，App 就会去关用户自己开的 llama-server。
+
+修法：同一个地址上已有我们启动的、还活着的服务，就**沿用同一个对象**，不换新的。
+
+顺带把 `ours` 从 `status()` 里临时算改成 **只读属性**，语义只有一个出处，而且 `stop()` 清掉句柄后它自然变 False，不会残留假的"我们启动的"。
+
+---
+
 ## 已知边界
 
 - **图片理解仍走 Ollama 那条路**。llama.cpp 的 OpenAI 兼容层对多模态格式挑剔，所以 `_strip_images` 直接把图片字段剥掉——宁可少传也不要让整个请求 400。
