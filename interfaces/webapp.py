@@ -508,7 +508,18 @@ def create_app(
             log.warning("升级守卫失败（忽略）：%s", exc)
         try:
             from core import beta
-            beta.apply_on_startup(model_settings_store)
+            applied = beta.apply_on_startup(model_settings_store)
+            if applied:
+                # 配置被启动逻辑改写过 → 内存里的模型客户端还端着旧
+                # Key。不 reload 就是实机验证抓到的第二只虫：文件已是
+                # 新 Key，客户端照样 401。
+                #（鸭子类型：ModelRegistry 有 reload；测试里可能是
+                # MockChatModel，没有 reload 就不必调。）
+                reloader = getattr(model, "reload", None)
+                if reloader is not None:
+                    reloader()
+                service_state.reset(detail="Beta 配置已更新，等待首次真实调用")
+                log.info("Beta 预设启动时已更新，模型客户端已重载")
         except Exception as exc:      # 永不掀翻启动
             log.warning("Beta 预设套用失败（忽略）：%s", exc)
 

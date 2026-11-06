@@ -912,6 +912,38 @@ def test_beta_startup_reapplies_preset_if_config_changed(beta_client, tmp_path,
     assert after["openai"]["model"] == "fake-test-model"
 
 
+def test_beta_startup_reapply_also_reloads_model_registry(beta_client,
+                                                          monkeypatch):
+    """启动时预设套用若真的改写了配置，**注册表必须重载**。
+
+    2026-11-06 实机验证抓到的第二只虫：apply_on_startup 把新 Key
+    写进了 model_settings.json，但 create_app 时建好的 ModelRegistry
+    还端着旧 Key → 启动路径没 reload → 云端 401，重启也修不好。
+    钉法：真跑 lifespan（重启 TestClient），数 reload 被调的次数。
+    """
+    from starlette.testclient import TestClient
+    from models.settings_store import ModelSettingsStore
+    c, store, model, tmp = beta_client
+    assert c.post("/api/beta/unlock", json={"code": BETA_CODE}).json()["ok"]
+
+    reloads = []
+    monkeypatch.setattr(model, "reload", lambda: reloads.append(1),
+                        raising=False)
+
+    # 外部把 Key 改掉（"Beta 活跃但配置被外部改过"）
+    st = ModelSettingsStore(tmp / "model_settings.json")
+    st.update({"openai": {"api_key": "sk-someone-else"}})
+
+    # 重启一次 lifespan：应 reapply + reload
+    with TestClient(c.app):
+        assert reloads == [1], "配置被改写后启动必须重载注册表"
+        assert st.load()["openai"]["api_key"] == FAKE_KEY
+
+    # 再重启一次：Key 已一致 → 不改写 → 不再 reload（幂等）
+    with TestClient(c.app):
+        assert reloads == [1], "没改写就不该又 reload"
+
+
 def test_beta_code_not_logged(beta_client, caplog):
     """C 安全：体验码明文不进日志。"""
     import logging

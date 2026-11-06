@@ -303,8 +303,14 @@ def _preset_patch(preset: dict) -> dict:
     return patch
 
 
-def apply_on_startup(store) -> None:
+def apply_on_startup(store) -> bool:
     """Core 启动时：Beta 活跃但配置被外部改过 → 重新套用预设。
+
+    返回是否真的**改写**了配置（True = store.update 执行过）。
+    调用方（webapp 启动）据此决定要不要 `model.reload()` ——
+    只写文件不 reload 是这次实机验证抓到的第二只虫：注册表在
+    create_app 时就用**当时的旧 Key** 建好了，文件更新了
+    内存客户端还端着旧 Key，云端照样 401。
 
     没有活跃的 Beta 状态就什么都不做（不碰用户自己的配置）。
 
@@ -335,12 +341,12 @@ def apply_on_startup(store) -> None:
         else:
             # 没激活过，但可能残留了半截备份文件
             _clear_backup()
-        return
+        return False
     if not is_active():
-        return
+        return False
     preset = load_preset()
     if preset is None:
-        return
+        return False
     patch = _preset_patch(preset)
     provider = patch["provider"]
     sect = "openai" if provider == "openai" else "ollama"
@@ -348,13 +354,12 @@ def apply_on_startup(store) -> None:
     try:
         cur = store.load()
     except Exception:                   # pragma: no cover
-        return
+        return False
     # "已经是预设状态，什么都不做"的判断**必须包含 api_key**。
     # 只比 provider+model 会漏一个真实场景：Beta 包升级换了 Key
     # （provider/model 名字没变）。结果旧 Key 一直在配置里，
     # 云端 401，用户看到"解锁了但聊天失败"，而且**重启也修不好**。
-    # （2026-11-06 实机验证抓到：旧 Key 401 → 换新 Key 重新打包 →
-    #  启动时 compare 提前 return → 旧 Key 残留。）
+    # （2026-11-06 实机验证抓到。）
     # preset 里没有 api_key 时保持原行为（不比对，不反复覆写）。
     want_cfg = patch.get(sect, {})
     want_key = want_cfg.get("api_key")
@@ -362,8 +367,10 @@ def apply_on_startup(store) -> None:
     if (cur.get("provider") == provider
             and cur.get(sect, {}).get("model") == want
             and (not want_key or cur_key == want_key)):
-        return                          # 已经是预设状态，什么都不做
+        return False                    # 已经是预设状态，什么都不做
     try:
         store.update(patch)
     except Exception as exc:            # pragma: no cover
         log.warning("启动时重新套用 Beta 预设失败：%s", exc)
+        return False
+    return True
