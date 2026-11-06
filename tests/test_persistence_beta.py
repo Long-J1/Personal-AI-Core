@@ -293,6 +293,54 @@ def test_public_build_clears_stale_beta_state(tmp_path, monkeypatch, beta_dir):
     assert hyp.get(h.id) is not None
 
 
+def test_startup_reapplies_preset_after_key_rotation(tmp_path, monkeypatch,
+                                                     beta_dir):
+    """**Beta 包升级换 Key**：provider/model 不变、只有 api_key 不同。
+
+    2026-11-06 实机验证抓到的真 bug：apply_on_startup 只比
+    provider+model，撞上"旧解锁留下的同名 provider/model"就提前
+    return，新包里的新 Key 没写进去 —— 云端 401，用户以为解锁了
+    却聊不了天，而且**重启也修不好**。
+    """
+    import sys
+    import types
+    from core import beta
+    from models.settings_store import ModelSettingsStore
+
+    mod = types.ModuleType("models._beta_preset")
+    mod.PRESET = {"provider": "openai", "base_url": "http://b/v1",
+                  "model": "b", "api_key": "sk-old",
+                  "code_sha256": []}
+    mod.BUILD_CHANNEL = "beta"
+    monkeypatch.setitem(sys.modules, "models._beta_preset", mod)
+    monkeypatch.setattr(beta, "DATA_DIR", tmp_path)
+
+    st = ModelSettingsStore(tmp_path / "ms.json")
+    st.update({"provider": "openai",
+               "openai": {"base_url": "http://mine/v1", "model": "mine",
+                          "api_key": "sk-mine"}})
+    import hashlib
+    code = "REAL-CODE"
+    mod.PRESET["code_sha256"] = [hashlib.sha256(code.encode()).hexdigest()]
+    ok, _ = beta.unlock(st, code)
+    assert ok is True
+    # 现场生效的是旧 preset 的 Key
+    assert st.load()["openai"]["api_key"] == "sk-old"
+
+    # 包升级：preset 换了 Key，provider / model 不变
+    mod.PRESET["api_key"] = "sk-NEW-rotated-key"
+    assert beta.is_active() is True
+    beta.apply_on_startup(st)
+    got = st.load()["openai"]
+    assert got["api_key"] == "sk-NEW-rotated-key", \
+        "换 Key 后必须在启动时覆写，否则旧 Key 一直 401"
+    assert got["model"] == "b"
+
+    # 再启动一次：Key 已一致 → 不反复覆写（幂等）
+    beta.apply_on_startup(st)
+    assert st.load()["openai"]["api_key"] == "sk-NEW-rotated-key"
+
+
 def test_uninstall_does_not_delete_appdata():
     """installer 配置：卸载**不得**删用户数据。
 
