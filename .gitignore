@@ -14,3 +14,12 @@ desktop/dist/
 # Beta 体验预设：构建时注入，绝不进仓库（含凭证）
 models/_beta_preset.py
 core/_build_version.py
+
+# 本地开发/调试产物（含密钥或个人状态，绝不入仓库）
+.gpt-profile/
+.webui_secret_key
+chatgpt_link_test.png
+chatgpt_state.png
+scripts/gpt_browser_login.py
+scripts/gpt_open_link.py
+vcp-vcptoolbox/
